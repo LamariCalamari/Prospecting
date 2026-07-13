@@ -255,6 +255,63 @@ def get_charges(company_number: str, max_items: int = 20) -> list[Charge]:
     return charges
 
 
+def get_accounts_ixbrl(company_number: str) -> Optional[str]:
+    """Fetch the latest filed accounts as iXBRL (XHTML), when available.
+
+    Flow: filing history (category=accounts) -> document metadata -> document
+    content with Accept: application/xhtml+xml. Older/paper filings only have a
+    scanned PDF and return None. The document endpoint redirects to a signed
+    AWS URL that must be followed WITHOUT the auth header (sending it breaks
+    the AWS signature), hence the manual redirect handling.
+    """
+    if not company_number:
+        return None
+    data = _get(
+        f"/company/{company_number}/filing-history",
+        params={"category": "accounts", "items_per_page": 5},
+    )
+    for item in data.get("items", []) or []:
+        meta_url = (item.get("links") or {}).get("document_metadata")
+        if not meta_url:
+            continue
+        try:
+            meta_resp = SESSION.get(
+                meta_url,
+                auth=(config.COMPANIES_HOUSE_API_KEY, ""),
+                timeout=config.REQUEST_TIMEOUT,
+            )
+            if not meta_resp.ok:
+                continue
+            meta = meta_resp.json()
+        except (requests.RequestException, ValueError):
+            continue
+        if "application/xhtml+xml" not in (meta.get("resources") or {}):
+            continue  # scanned PDF only — not machine-readable
+        doc_url = (meta.get("links") or {}).get("document")
+        if not doc_url:
+            continue
+        try:
+            first = SESSION.get(
+                doc_url,
+                auth=(config.COMPANIES_HOUSE_API_KEY, ""),
+                headers={"Accept": "application/xhtml+xml"},
+                timeout=config.REQUEST_TIMEOUT,
+                allow_redirects=False,
+            )
+            if first.status_code in (301, 302, 303, 307, 308):
+                signed = first.headers.get("Location")
+                if not signed:
+                    continue
+                resp = SESSION.get(signed, timeout=config.REQUEST_TIMEOUT)
+            else:
+                resp = first
+            if resp.ok and "html" in (resp.headers.get("Content-Type") or ""):
+                return resp.text
+        except requests.RequestException:
+            continue
+    return None
+
+
 def get_psc(company_number: str, max_items: int = 100) -> list[PSC]:
     """Persons with significant control for a company (paged)."""
     if not company_number:

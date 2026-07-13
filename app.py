@@ -14,7 +14,7 @@ from __future__ import annotations
 import streamlit as st
 
 import config
-from core import assembly, export, prospecting
+from core import assembly, export, prospecting, valuation
 from core.models import OfficerCandidate
 
 st.set_page_config(page_title="Prospecting one-sheet", page_icon="🔎", layout="wide")
@@ -226,6 +226,7 @@ elif st.session_state.stage == "disambiguate":
 elif st.session_state.stage == "sheet":
     sheet = st.session_state.sheet
     sig = prospecting.derive_signals(sheet, sheet.confirmed_name)
+    est = valuation.build_estimates(sheet, sheet.confirmed_name)
     wd = sheet.wikidata
 
     # --- Header ---
@@ -243,14 +244,24 @@ elif st.session_state.stage == "sheet":
 
     # --- Prospecting snapshot (metric tiles) ---
     st.markdown("#### 🎯 Prospecting snapshot")
-    m = st.columns(4)
-    m[0].metric("Net worth", sig.net_worth or "—")
+    m = st.columns(5)
+    m[0].metric("Net worth (published)", sig.net_worth or "—")
     stake_val = sig.top_ownership or (
         f"{sig.top_former_ownership} (former)" if sig.top_former_ownership else "—"
     )
     m[1].metric("Largest disclosed stake", stake_val)
-    m[2].metric("Active directorships", sig.active_directorships or "—")
-    m[3].metric("Companies controlled", len(sig.stakes) or "—")
+    if est.counted:
+        book_val = f"{valuation.fmt_gbp(est.total_lo)}–{valuation.fmt_gbp(est.total_hi)}"
+    else:
+        book_val = "—"
+    m[2].metric(
+        "Est. stake value (book)",
+        book_val,
+        help="Sum over disclosed stakes of PSC band × net assets from the "
+             "latest filed accounts. A conservative floor — see the 💰 tab.",
+    )
+    m[3].metric("Active directorships", sig.active_directorships or "—")
+    m[4].metric("Companies controlled", len(sig.stakes) or "—")
     flags = []
     if sig.companies_with_charges:
         flags.append(f"💷 {sig.companies_with_charges} co. with registered charges (debt)")
@@ -280,9 +291,9 @@ elif st.session_state.stage == "sheet":
 
     st.divider()
 
-    tab_overview, tab_control, tab_companies, tab_risk, tab_news = st.tabs(
-        ["👤 Overview", "🏢 Directorships & control", "📊 Companies",
-         "⚖️ Regulatory & risk", "📰 News"]
+    tab_overview, tab_control, tab_value, tab_companies, tab_risk, tab_news = st.tabs(
+        ["👤 Overview", "🏢 Directorships & control", "💰 Stake value",
+         "📊 Companies", "⚖️ Regulatory & risk", "📰 News"]
     )
 
     # ========================= OVERVIEW =========================
@@ -385,6 +396,80 @@ elif st.session_state.stage == "sheet":
                         f"(notified {p.notified_on or '—'}{ceased}) "
                         f"· [CH ↗]({p.source_url})"
                     )
+
+    # ========================= STAKE VALUE =========================
+    with tab_value:
+        st.markdown("### Estimated stake value")
+        st.markdown(
+            "**Method:** `disclosed stake band (Companies House PSC) × company "
+            "value`. Every input is shown and linked; the result is an "
+            "**estimate range**, not a fact."
+        )
+        st.caption(
+            "Company value basis: **book value** (net assets from the latest "
+            "filed accounts). This is a conservative floor — a profitable or "
+            "high-growth company is usually worth a multiple of book, and UK "
+            "SPV/holding-company accounts often exclude wealth held in other "
+            "structures. For a market-basis estimate, use the calculator below "
+            "with a valuation you know (e.g. from funding-round coverage)."
+        )
+        if est.counted:
+            st.metric(
+                "Total estimated stake value (book-value floor)",
+                f"{valuation.fmt_gbp(est.total_lo)} – {valuation.fmt_gbp(est.total_hi)}",
+            )
+        if est.stakes:
+            st.markdown("#### Per-company breakdown")
+            for s in est.stakes:
+                band = f"{s.stake_lo:.0%}–{s.stake_hi:.0%}"
+                if s.net_assets is not None:
+                    date = f", accounts to {s.accounts_date}" if s.accounts_date else ""
+                    st.markdown(
+                        f"- **{s.company_name}** — {band} × net assets "
+                        f"{valuation.fmt_gbp(s.net_assets)}{date} = "
+                        f"**{valuation.fmt_gbp(s.value_lo)}–{valuation.fmt_gbp(s.value_hi)}** "
+                        f"· [CH ↗]({s.source_url})"
+                    )
+                else:
+                    st.markdown(
+                        f"- **{s.company_name}** — {band} × *accounts not "
+                        f"machine-readable (older/paper filing)* "
+                        f"· [CH ↗]({s.source_url})"
+                    )
+            if est.missing:
+                st.caption(
+                    f"{est.missing} stake(s) have no parseable accounts — open the "
+                    "Companies House link to read the filed PDF accounts directly."
+                )
+
+            st.markdown("#### Market-basis calculator")
+            st.caption(
+                "Know a market valuation from press coverage or a funding round? "
+                "Apply this person's disclosed stake band to it. The valuation is "
+                "your input — the app never invents one."
+            )
+            calc_options = {
+                f"{s.company_name} ({s.stake_lo:.0%}–{s.stake_hi:.0%})": s
+                for s in est.stakes
+            }
+            pick = st.selectbox("Company", list(calc_options.keys()))
+            mv = st.number_input(
+                "Known market valuation (£ millions)", min_value=0.0, step=10.0,
+                value=0.0,
+            )
+            if mv > 0:
+                s = calc_options[pick]
+                lo, hi = valuation.apply_market_valuation(s, mv * 1e6)
+                st.success(
+                    f"Estimated holding in {s.company_name}: "
+                    f"**{valuation.fmt_gbp(lo)} – {valuation.fmt_gbp(hi)}** "
+                    f"({s.stake_lo:.0%}–{s.stake_hi:.0%} of £{mv:,.0f}m — your figure)"
+                )
+        else:
+            st.caption(
+                "No disclosed share-ownership stakes to value (select a Companies "
+                "House officer, or this person holds no PSC share bands)."
+            )
 
     # ========================= COMPANIES =========================
     with tab_companies:

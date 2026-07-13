@@ -6,7 +6,7 @@ every fact with a source link, matching the on-screen sheet.
 """
 from __future__ import annotations
 
-from core import prospecting
+from core import prospecting, valuation
 from core.models import OneSheet
 
 # fpdf2's core fonts are Latin-1 only. Map the common "smart" punctuation that
@@ -64,9 +64,42 @@ def to_markdown(sheet: OneSheet) -> str:
     lines.append("- **Find online:** " + " · ".join(links))
     lines.append(
         "_Net worth shows only when published. Stake = Companies House PSC band, "
-        "verbatim. Free sources don't provide company valuations._"
+        "verbatim._"
     )
     lines.append("")
+
+    # Estimated stake value (book-value basis)
+    est = valuation.build_estimates(sheet, sheet.confirmed_name)
+    if est.stakes:
+        lines.append("## Estimated stake value (book-value basis)")
+        lines.append(
+            "_Method: disclosed stake band (CH PSC) × net assets from the latest "
+            "filed accounts. A conservative floor, not market value. Estimates, "
+            "not facts._"
+        )
+        if est.counted:
+            lines.append(
+                f"- **Total: {valuation.fmt_gbp(est.total_lo)} – "
+                f"{valuation.fmt_gbp(est.total_hi)}** "
+                f"(across {est.counted} of {len(est.stakes)} stakes with "
+                "machine-readable accounts)"
+            )
+        for s in est.stakes:
+            band = f"{s.stake_lo:.0%}–{s.stake_hi:.0%}"
+            if s.net_assets is not None:
+                lines.append(
+                    f"- {s.company_name}: {band} × net assets "
+                    f"{valuation.fmt_gbp(s.net_assets)}"
+                    + (f" (accounts to {s.accounts_date})" if s.accounts_date else "")
+                    + f" = {valuation.fmt_gbp(s.value_lo)}–{valuation.fmt_gbp(s.value_hi)}"
+                    f" — [Companies House]({s.source_url})"
+                )
+            else:
+                lines.append(
+                    f"- {s.company_name}: {band} × (accounts not machine-readable)"
+                    f" — [Companies House]({s.source_url})"
+                )
+        lines.append("")
 
     # Position & company
     lines.append("## Position & company")
@@ -332,11 +365,17 @@ def to_excel(sheet: OneSheet) -> bytes:
     stake = sig.top_ownership or (
         f"{sig.top_former_ownership} (former)" if sig.top_former_ownership else "—"
     )
+    est_sum = valuation.build_estimates(sheet, sheet.confirmed_name)
+    book = (
+        f"{valuation.fmt_gbp(est_sum.total_lo)} – {valuation.fmt_gbp(est_sum.total_hi)}"
+        if est_sum.counted else "—"
+    )
     summary_rows = [
         ("Name", sheet.confirmed_name),
         ("Research context", sheet.context or "—"),
         ("Net worth (published)", sig.net_worth or "—"),
         ("Largest disclosed stake", stake),
+        ("Est. stake value (book-value floor)", book),
         ("Active directorships", sig.active_directorships),
         ("Past directorships", sig.resigned_directorships),
         ("Companies controlled (current PSC)", len(sig.stakes)),
@@ -386,6 +425,36 @@ def to_excel(sheet: OneSheet) -> bytes:
         link_cols={6},
         note="No ownership stakes matched to this person.",
     )
+
+    # --- Stake value estimates ---
+    est = valuation.build_estimates(sheet, sheet.confirmed_name)
+    est_rows = []
+    for s in est.stakes:
+        est_rows.append([
+            s.company_name, s.company_number,
+            f"{s.stake_lo:.0%}–{s.stake_hi:.0%}",
+            s.net_assets if s.net_assets is not None else "not machine-readable",
+            s.accounts_date,
+            s.value_lo, s.value_hi, s.source_url,
+        ])
+    ws_est = _add_sheet(
+        "Stake estimates",
+        ["Company", "Number", "Stake band (PSC)", "Net assets (GBP)",
+         "Accounts to", "Est. value low (GBP)", "Est. value high (GBP)", "Source"],
+        est_rows,
+        link_cols={8},
+        note="No disclosed share-ownership stakes to value.",
+    )
+    if est_rows:
+        r = len(est_rows) + 3
+        note_cell = ws_est.cell(row=r, column=1)
+        note_cell.value = (
+            "ESTIMATES, not facts. Method: stake band (Companies House PSC) × net "
+            "assets from the latest filed accounts (book value — a conservative "
+            "floor, not market value). "
+            f"Total where computable: £{est.total_lo:,.0f} – £{est.total_hi:,.0f}."
+        )
+        note_cell.font = Font(italic=True, color="6B7280")
 
     # --- Companies ---
     _add_sheet(

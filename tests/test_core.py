@@ -4,7 +4,7 @@ Run from the project root:  python -m unittest discover -s tests
 """
 import unittest
 
-from core import assembly, export, prospecting
+from core import assembly, export, prospecting, valuation
 from core.models import (
     Appointment,
     CompanyInfo,
@@ -231,6 +231,71 @@ class TestAutoSelect(unittest.TestCase):
                 self.title = t
         cands = [W("Candy (disambiguation)"), W("Nick Candy")]
         self.assertEqual(prospecting.best_wiki_index(cands, "Nick Candy"), 1)
+
+
+class TestValuation(unittest.TestCase):
+    def test_band_to_range(self):
+        self.assertEqual(
+            valuation.band_to_range(["ownership-of-shares-75-to-100-percent"]),
+            (0.75, 1.0),
+        )
+        self.assertEqual(
+            valuation.band_to_range(
+                ["voting-rights-25-to-50-percent",
+                 "ownership-of-shares-25-to-50-percent"]
+            ),
+            (0.25, 0.5),
+        )
+        self.assertEqual(
+            valuation.band_to_range(
+                ["ownership-of-shares-more-than-25-percent-registered-overseas-entity"]
+            ),
+            (0.25, 1.0),
+        )
+        self.assertIsNone(valuation.band_to_range(["significant-influence-or-control"]))
+
+    def test_extract_ixbrl_figures(self):
+        xhtml = (
+            '<html><body>'
+            '<ix:nonFraction name="uk-core:NetAssetsLiabilities" contextRef="c1" '
+            'unitRef="GBP" decimals="0" scale="3" format="ixt:numdotdecimal">'
+            '1,234</ix:nonFraction>'
+            '<ix:nonFraction name="uk-core:CashBankOnHand" contextRef="c1" '
+            'unitRef="GBP" sign="-" decimals="0">500</ix:nonFraction>'
+            '</body></html>'
+        )
+        fig = valuation.extract_ixbrl_figures(xhtml)
+        self.assertEqual(fig["net_assets"], 1_234_000)  # scale=3
+        self.assertEqual(fig["cash"], -500)             # sign=-
+
+    def test_build_estimates_math_and_clamp(self):
+        sheet = OneSheet(
+            confirmed_name="Jane Example",
+            psc_filings=[
+                PSC("GOODCO", "1", "Jane Example", "individual",
+                    ["ownership-of-shares-50-to-75-percent"]),
+                PSC("BADCO", "2", "Jane Example", "individual",
+                    ["ownership-of-shares-75-to-100-percent"]),
+            ],
+            companies=[
+                CompanyInfo("GOODCO", "1", net_assets=1_000_000.0,
+                            accounts_last_made_up_to="2025-12-31"),
+                CompanyInfo("BADCO", "2", net_assets=-50_000.0),  # net liabilities
+            ],
+        )
+        est = valuation.build_estimates(sheet, "Jane Example")
+        self.assertEqual(est.counted, 2)
+        good = next(s for s in est.stakes if s.company_name == "GOODCO")
+        self.assertEqual((good.value_lo, good.value_hi), (500_000.0, 750_000.0))
+        bad = next(s for s in est.stakes if s.company_name == "BADCO")
+        self.assertEqual((bad.value_lo, bad.value_hi), (0.0, 0.0))  # clamped
+        self.assertEqual(est.total_hi, 750_000.0)
+
+    def test_fmt_gbp(self):
+        self.assertEqual(valuation.fmt_gbp(1_500_000_000), "£1.5bn")
+        self.assertEqual(valuation.fmt_gbp(2_300_000), "£2.3m")
+        self.assertEqual(valuation.fmt_gbp(45_000), "£45k")
+        self.assertEqual(valuation.fmt_gbp(None), "—")
 
 
 if __name__ == "__main__":

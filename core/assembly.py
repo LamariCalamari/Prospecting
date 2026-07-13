@@ -25,7 +25,7 @@ from core.models import (
     WikiCandidate,
     WikiSummary,
 )
-from core import prospecting
+from core import prospecting, valuation
 from sources import charity_commission as charity
 from sources import companies_house as ch
 from sources import fca
@@ -37,6 +37,9 @@ from sources import wikipedia as wiki
 
 # How many companies to pull deep-dive filing/charge data for (bounds API cost).
 _DEEP_DIVE_COMPANY_LIMIT = 8
+# How many stake companies to fetch filed accounts (iXBRL) for. Each costs ~3
+# requests; CH allows 600 per 5 minutes, so this stays well inside the limit.
+_ACCOUNTS_FETCH_LIMIT = 20
 
 
 @dataclass
@@ -125,6 +128,59 @@ def find_candidates(name: str, context: str = "") -> Candidates:
     return result
 
 
+def _merged_appointments(officer: OfficerCandidate) -> list:
+    """All appointments for a person, merged across their CH officer records.
+
+    Companies House fragments one human across several officer ids (roughly one
+    per filing style), so reading a single record can silently drop most of a
+    person's directorships. We re-search by the officer's name, keep records
+    with the same name whose birth date doesn't conflict with the chosen one,
+    and merge their appointments (deduped by company + role + date).
+    """
+    records = [officer]
+    try:
+        for rec in ch.search_officers(officer.name, limit=20):
+            if rec.officer_id == officer.officer_id:
+                continue
+            if not prospecting.names_match(rec.name, officer.name):
+                continue
+            # Same name but a *different* birth date = a namesake; skip. A record
+            # with no birth date is kept — CH often omits it on older filings.
+            if (
+                officer.date_of_birth
+                and rec.date_of_birth
+                and rec.date_of_birth != officer.date_of_birth
+            ):
+                continue
+            records.append(rec)
+    except ch.CompaniesHouseError:
+        pass  # merging is best-effort; the chosen record alone still works
+
+    # Fetch the fattest records first: CH usually has one consolidated record
+    # holding most of the person's appointments, and it must not fall past the
+    # fetch cap because of a long tail of one-appointment fragments.
+    records.sort(key=lambda r: r.appointment_count or 0, reverse=True)
+
+    def _fetch(rec: OfficerCandidate):
+        try:
+            appts, _ = ch.get_officer_appointments(rec.officer_id)
+            return appts
+        except ch.CompaniesHouseError:
+            return []
+
+    merged = []
+    seen: set[tuple] = set()
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for appts in pool.map(_fetch, records[:8]):
+            for a in appts:
+                key = (a.company_number, a.officer_role, a.appointed_on)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(a)
+    merged.sort(key=lambda a: (a.status == "resigned", a.appointed_on or ""))
+    return merged
+
+
 def build_one_sheet(
     confirmed_name: str,
     officer: Optional[OfficerCandidate],
@@ -142,15 +198,14 @@ def build_one_sheet(
     # --- Companies House: appointments, companies, PSC ---
     if officer is not None:
         sheet.officer = officer
-        appointments, _ = ch.get_officer_appointments(officer.officer_id)
-        sheet.appointments = appointments
+        sheet.appointments = _merged_appointments(officer)
 
         # Deduplicate company numbers (preserving order), then fetch profile +
         # PSC for each in parallel — a prolific director can have many companies
         # and doing this sequentially is the main source of latency.
         seen: set[str] = set()
         company_numbers: list[str] = []
-        for appt in appointments:
+        for appt in sheet.appointments:
             num = appt.company_number
             if num and num not in seen:
                 seen.add(num)
@@ -194,6 +249,42 @@ def build_one_sheet(
                         sheet.companies.append(profile)
                     if psc:
                         sheet.psc_filings.extend(psc)
+
+        # --- Filed-accounts figures for stake valuation ---
+        # For companies where this person holds a *current* disclosed stake,
+        # pull the latest accounts (iXBRL) and extract net assets, so the
+        # estimates layer can price the stake on a book-value basis. Bounded
+        # and parallel; companies with paper/PDF-only accounts just stay blank.
+        stake_numbers: list[str] = []
+        for psc_item in sheet.psc_filings:
+            if psc_item.ceased_on or not psc_item.name:
+                continue
+            if not prospecting.names_match(psc_item.name, confirmed_name):
+                continue
+            if valuation.band_to_range(psc_item.natures_of_control) is None:
+                continue
+            if psc_item.company_number not in stake_numbers:
+                stake_numbers.append(psc_item.company_number)
+        stake_numbers = stake_numbers[:_ACCOUNTS_FETCH_LIMIT]
+        if stake_numbers:
+            by_number = {c.company_number: c for c in sheet.companies}
+
+            def _fetch_accounts(num: str) -> None:
+                comp = by_number.get(num)
+                if comp is None:
+                    return
+                try:
+                    xhtml = ch.get_accounts_ixbrl(num)
+                except ch.CompaniesHouseError:
+                    return
+                if not xhtml:
+                    return
+                figures = valuation.extract_ixbrl_figures(xhtml)
+                comp.net_assets = figures.get("net_assets")
+                comp.cash_at_bank = figures.get("cash")
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(_fetch_accounts, stake_numbers))
 
     # --- Wikipedia: confident summary only ---
     if wiki_title:

@@ -96,6 +96,9 @@ class CompanyInfo:
     has_charges: Optional[bool] = None
     recent_filings: list[FilingItem] = field(default_factory=list)
     charges: list[Charge] = field(default_factory=list)
+    # From the latest filed accounts (iXBRL), when parseable. GBP.
+    net_assets: Optional[float] = None
+    cash_at_bank: Optional[float] = None
 
 
 # --- Wikidata ---------------------------------------------------------------
