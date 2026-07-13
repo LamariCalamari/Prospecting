@@ -264,3 +264,199 @@ def to_pdf(sheet: OneSheet) -> bytes:
 
     out = pdf.output()  # fpdf2 returns a bytearray
     return bytes(out)
+
+
+def to_excel(sheet: OneSheet) -> bytes:
+    """Render the one-sheet as a structured multi-tab .xlsx workbook.
+
+    One tab per data domain (Summary, Directorships, Ownership, Companies, PSC,
+    Regulatory, Charities, Sanctions, Gazette, News). Every tab has a styled,
+    frozen header row, auto-sized columns, and clickable source links — so the
+    export is analysis-ready, not just a dump. Empty domains still get a tab with
+    a clear "no data" note, so the structure is predictable.
+    """
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(bold=True, color="FFFFFF")
+    title_font = Font(bold=True, size=14)
+    link_font = Font(color="2563EB", underline="single")
+    wrap = Alignment(vertical="top", wrap_text=True)
+
+    wb = Workbook()
+
+    def _add_sheet(name: str, headers: list[str], rows: list[list],
+                   link_cols: Optional[set[int]] = None, note: str = ""):
+        ws = wb.create_sheet(title=name[:31])
+        link_cols = link_cols or set()
+        if not rows:
+            ws["A1"] = note or "No data returned for this source."
+            ws["A1"].font = Font(italic=True, color="6B7280")
+            return ws
+        for c, head in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=c, value=head)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(vertical="center")
+        for r, row in enumerate(rows, start=2):
+            for c, val in enumerate(row, start=1):
+                cell = ws.cell(row=r, column=c)
+                text = "" if val is None else str(val)
+                cell.value = text
+                cell.alignment = wrap
+                if c in link_cols and text.startswith("http"):
+                    cell.hyperlink = text
+                    cell.font = link_font
+        # Auto width (capped) from the longest cell in each column.
+        for c in range(1, len(headers) + 1):
+            longest = max(
+                [len(str(headers[c - 1]))]
+                + [len(str(row[c - 1])) for row in rows if c - 1 < len(row)]
+            )
+            ws.column_dimensions[get_column_letter(c)].width = min(max(longest + 2, 12), 60)
+        ws.freeze_panes = "A2"
+        return ws
+
+    sig = prospecting.derive_signals(sheet, sheet.confirmed_name)
+
+    # --- Summary tab (key/value) ---
+    ws = wb.active
+    ws.title = "Summary"
+    ws["A1"] = f"Prospecting one-sheet — {sheet.confirmed_name}"
+    ws["A1"].font = title_font
+    ws.merge_cells("A1:B1")
+    stake = sig.top_ownership or (
+        f"{sig.top_former_ownership} (former)" if sig.top_former_ownership else "—"
+    )
+    summary_rows = [
+        ("Name", sheet.confirmed_name),
+        ("Research context", sheet.context or "—"),
+        ("Net worth (published)", sig.net_worth or "—"),
+        ("Largest disclosed stake", stake),
+        ("Active directorships", sig.active_directorships),
+        ("Past directorships", sig.resigned_directorships),
+        ("Companies controlled (current PSC)", len(sig.stakes)),
+        ("Companies controlled (former PSC)", len(sig.former_stakes)),
+        ("Companies with charges (debt)", sig.companies_with_charges),
+        ("Companies with insolvency history", sig.insolvency_companies),
+        ("Occupation", ", ".join(sheet.wikidata.occupations) if sheet.wikidata else "—"),
+        ("LinkedIn (verified)", sig.linkedin_url or "—"),
+        ("Search LinkedIn", sig.linkedin_search_url),
+        ("Official website",
+         sheet.wikidata.official_website if sheet.wikidata and sheet.wikidata.official_website else "—"),
+        ("Wikipedia", sheet.wiki.url if sheet.wiki else "—"),
+    ]
+    for r, (k, v) in enumerate(summary_rows, start=3):
+        kc = ws.cell(row=r, column=1, value=k)
+        kc.font = Font(bold=True)
+        vcell = ws.cell(row=r, column=2, value=str(v))
+        vcell.alignment = wrap
+        if str(v).startswith("http"):
+            vcell.hyperlink = str(v)
+            vcell.font = link_font
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 70
+    ws["A2"] = ("Every value is sourced. Blanks/'—' mean the source returned "
+                "nothing — nothing is inferred or estimated.")
+    ws["A2"].font = Font(italic=True, color="6B7280")
+    ws.merge_cells("A2:B2")
+
+    # --- Directorships ---
+    _add_sheet(
+        "Directorships",
+        ["Status", "Company", "Company number", "Role", "Appointed", "Resigned", "Source"],
+        [[a.status, a.company_name, a.company_number, a.officer_role,
+          a.appointed_on, a.resigned_on, a.source_url] for a in sheet.appointments],
+        link_cols={7},
+        note="No directorships returned (no Companies House officer selected, or none on file).",
+    )
+
+    # --- Ownership stakes ---
+    _add_sheet(
+        "Ownership stakes",
+        ["Company", "Company number", "Control (verbatim PSC band)", "Current/Former", "Ceased", "Source"],
+        [[s.company_name, s.company_number, "; ".join(s.controls),
+          "Current", "", s.source_url] for s in sig.stakes]
+        + [[s.company_name, s.company_number, "; ".join(s.controls),
+            "Former", s.ceased_on, s.source_url] for s in sig.former_stakes],
+        link_cols={6},
+        note="No ownership stakes matched to this person.",
+    )
+
+    # --- Companies ---
+    _add_sheet(
+        "Companies",
+        ["Company", "Number", "Status", "Type", "Incorporated", "Accounts to",
+         "Accounts next due", "Overdue", "Has charges", "Insolvency history", "Source"],
+        [[c.company_name, c.company_number, c.status, c.company_type,
+          c.incorporation_date, c.accounts_last_made_up_to, c.accounts_next_due,
+          c.accounts_overdue, c.has_charges, c.has_insolvency_history, c.source_url]
+         for c in sheet.companies],
+        link_cols={11},
+        note="No company profiles returned.",
+    )
+
+    # --- PSC (all, incl. others) ---
+    _add_sheet(
+        "PSC (all)",
+        ["Company", "PSC name", "Kind", "Natures of control", "Notified", "Ceased", "Source"],
+        [[p.company_name, p.name, p.kind, "; ".join(p.natures_of_control),
+          p.notified_on, p.ceased_on, p.source_url] for p in sheet.psc_filings],
+        link_cols={7},
+        note="No PSC filings returned.",
+    )
+
+    # --- Regulatory (FCA) ---
+    _add_sheet(
+        "Regulatory (FCA)",
+        ["Name", "IRN", "Status", "Roles", "Firms", "Source"],
+        [[r.name, r.reference_number, r.status, ", ".join(r.roles),
+          ", ".join(r.firms), r.source_url] for r in sheet.fca_records],
+        link_cols={6},
+        note="No FCA-approved individual matched (or FCA not configured).",
+    )
+
+    # --- Charities ---
+    _add_sheet(
+        "Charities",
+        ["Name", "Charity number", "Status", "Source"],
+        [[c.name, c.charity_number, c.status, c.source_url] for c in sheet.charities],
+        link_cols={4},
+        note="No matching charities (or Charity Commission not configured).",
+    )
+
+    # --- Sanctions / PEP ---
+    _add_sheet(
+        "Sanctions & PEP",
+        ["Name", "Type", "Topics", "Countries", "Score", "Source"],
+        [[h.name, h.schema, ", ".join(h.topics), ", ".join(h.countries),
+          h.score, h.source_url] for h in sheet.sanctions_hits],
+        link_cols={6},
+        note="No sanctions/PEP matches (or OpenSanctions not configured).",
+    )
+
+    # --- Gazette ---
+    _add_sheet(
+        "Gazette notices",
+        ["Title", "Published", "Link"],
+        [[g.title, (g.published or "")[:10], g.link] for g in sheet.gazette_notices],
+        link_cols={3},
+        note="No Gazette notices matched.",
+    )
+
+    # --- News ---
+    _add_sheet(
+        "News",
+        ["Title", "Source", "Published", "Link"],
+        [[n.title, n.source, n.published, n.link] for n in sheet.news],
+        link_cols={4},
+        note="No news results.",
+    )
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

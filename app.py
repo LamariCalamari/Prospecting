@@ -105,13 +105,28 @@ elif st.session_state.stage == "disambiguate":
     cands = st.session_state.candidates
     st.subheader(f"Confirm who you mean: “{st.session_state.name}”")
     st.info(
-        "Pick the matching Companies House person and/or Wikipedia page, then "
-        "confirm. The one-sheet is built **only** for what you select here.",
+        "We've **pre-selected the most likely match** in each column — check "
+        "they're the same person, adjust if not, then confirm. The one-sheet is "
+        "built **only** for what you select here.",
         icon="✅",
     )
 
     for err in cands.errors:
         st.warning(err, icon="⚠️")
+
+    # Smart defaults: pre-select the best-matching officer + Wikipedia page so
+    # the two columns line up on the same person automatically. Birth year (from
+    # the matched Wikipedia page) is used to pick the right Companies House record
+    # among namesakes. Radio index 0 is the "none" option, so add 1.
+    best_off = prospecting.best_officer_index(
+        cands.officers, st.session_state.name, cands.birth_year
+    )
+    best_wiki = prospecting.best_wiki_index(cands.wiki, st.session_state.name)
+    officer_default = (best_off + 1) if best_off is not None else 0
+    wiki_default = (best_wiki + 1) if best_wiki is not None else 0
+    if cands.birth_year:
+        st.caption(f"↪ Wikipedia gives a birth year of **{cands.birth_year}** — "
+                   "used to match the right Companies House record.")
 
     col_ch, col_wiki = st.columns(2)
 
@@ -133,10 +148,14 @@ elif st.session_state.stage == "disambiguate":
             officer_map[label] = o
         if not cands.officers:
             st.caption("No Companies House officer matches.")
+        elif officer_default > 0:
+            st.caption("✅ auto-matched to this person — verify the birth year, change if wrong.")
+        else:
+            st.caption("⚠️ Several possible matches — pick the one with the correct birth year.")
         officer_choice = st.radio(
             "Select the officer",
             officer_labels,
-            index=0,
+            index=officer_default,
             label_visibility="collapsed",
         )
         chosen_officer = officer_map.get(officer_choice)
@@ -161,7 +180,7 @@ elif st.session_state.stage == "disambiguate":
         wiki_choice = st.radio(
             "Select the Wikipedia page",
             wiki_labels,
-            index=0,
+            index=wiki_default,
             label_visibility="collapsed",
         )
         chosen_wiki = wiki_map.get(wiki_choice)
@@ -474,25 +493,38 @@ elif st.session_state.stage == "sheet":
     st.divider()
     st.markdown("### Export")
     md = export.to_markdown(sheet)
-    exp_cols = st.columns(2)
+    safe_name = sheet.confirmed_name.replace(" ", "_")
+    exp_cols = st.columns(3)
     with exp_cols[0]:
-        st.download_button(
-            "⬇️ Download Markdown",
-            data=md,
-            file_name=f"onesheet_{sheet.confirmed_name.replace(' ', '_')}.md",
-            mime="text/markdown",
-        )
+        try:
+            xlsx_bytes = export.to_excel(sheet)
+            st.download_button(
+                "⬇️ Download Excel",
+                data=xlsx_bytes,
+                file_name=f"onesheet_{safe_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"Excel export unavailable: {exc}")
     with exp_cols[1]:
         try:
             pdf_bytes = export.to_pdf(sheet)
             st.download_button(
                 "⬇️ Download PDF",
                 data=pdf_bytes,
-                file_name=f"onesheet_{sheet.confirmed_name.replace(' ', '_')}.pdf",
+                file_name=f"onesheet_{safe_name}.pdf",
                 mime="application/pdf",
             )
         except Exception as exc:  # noqa: BLE001
             st.caption(f"PDF export unavailable: {exc}")
+    with exp_cols[2]:
+        st.download_button(
+            "⬇️ Download Markdown",
+            data=md,
+            file_name=f"onesheet_{safe_name}.md",
+            mime="text/markdown",
+        )
 
     with st.expander("Preview Markdown"):
         st.code(md, language="markdown")

@@ -126,6 +126,21 @@ class TestExport(unittest.TestCase):
         self.assertIn('"hi"', out)
         self.assertIn("don't", out)
 
+    def test_excel_is_valid_xlsx_with_expected_tabs(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        data = export.to_excel(self._sheet())
+        self.assertTrue(data[:2] == b"PK")  # xlsx is a zip
+        wb = load_workbook(BytesIO(data))
+        for tab in ["Summary", "Directorships", "Ownership stakes", "Companies",
+                    "PSC (all)", "News"]:
+            self.assertIn(tab, wb.sheetnames)
+        # Directorship data landed in the right tab.
+        dvals = [c.value for row in wb["Directorships"].iter_rows() for c in row]
+        self.assertIn("ACME LTD", dvals)
+
 
 class TestProspectingSignals(unittest.TestCase):
     def test_humanize_control_band(self):
@@ -171,6 +186,51 @@ class TestProspectingSignals(unittest.TestCase):
         self.assertEqual(sig.net_worth, "1,000,000 pound")
         self.assertEqual(sig.linkedin_url, "http://li/jane")
         self.assertIn("linkedin.com", sig.linkedin_search_url)
+
+
+class TestAutoSelect(unittest.TestCase):
+    def _off(self, name, dob=None, appts=None):
+        return OfficerCandidate(officer_id="x", name=name, source_url="",
+                                date_of_birth=dob, appointment_count=appts)
+
+    def test_best_officer_picks_matching_birth_year(self):
+        officers = [
+            self._off("CANDY CREATIONS UK LTD", None, 1),          # corporate — skip
+            self._off("Nicholas Anthony Christopher CANDY", "1955-06", 7),  # namesake
+            self._off("Nicholas Anthony Christopher CANDY", "1973-01", 3),  # the one
+        ]
+        idx = prospecting.best_officer_index(officers, "Nick Candy", birth_year="1973")
+        self.assertEqual(idx, 2)  # nickname + birth year pin the right Candy
+
+    def test_best_officer_none_when_ambiguous_without_year(self):
+        officers = [
+            self._off("Nicholas CANDY", "1955-06", 7),
+            self._off("Nicholas CANDY", "1973-01", 3),
+        ]
+        # Two same-name people, no birth year to disambiguate -> don't guess.
+        self.assertIsNone(prospecting.best_officer_index(officers, "Nicholas Candy"))
+
+    def test_best_officer_none_when_no_name_match(self):
+        officers = [self._off("John Smith", "1960-01", 3)]
+        self.assertIsNone(prospecting.best_officer_index(officers, "Jane Doe"))
+
+    def test_extract_birth_year(self):
+        self.assertEqual(
+            prospecting.extract_birth_year("British property developer (born 1973)"),
+            "1973",
+        )
+        self.assertIsNone(prospecting.extract_birth_year("no year here"))
+
+    def test_nickname_name_match(self):
+        self.assertTrue(prospecting.names_match("Nick Candy", "Nicholas Candy"))
+        self.assertTrue(prospecting.names_match("Nicholas Anthony CANDY", "Nick Candy"))
+
+    def test_best_wiki_index_matches_title(self):
+        class W:
+            def __init__(self, t):
+                self.title = t
+        cands = [W("Candy (disambiguation)"), W("Nick Candy")]
+        self.assertEqual(prospecting.best_wiki_index(cands, "Nick Candy"), 1)
 
 
 if __name__ == "__main__":

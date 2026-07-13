@@ -25,6 +25,7 @@ from core.models import (
     WikiCandidate,
     WikiSummary,
 )
+from core import prospecting
 from sources import charity_commission as charity
 from sources import companies_house as ch
 from sources import fca
@@ -44,6 +45,7 @@ class Candidates:
     officers: list[OfficerCandidate] = field(default_factory=list)
     wiki: list[WikiCandidate] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)  # per-source, non-fatal
+    birth_year: Optional[str] = None  # from the top Wikipedia match, for CH linking
 
 
 def find_candidates(name: str, context: str = "") -> Candidates:
@@ -54,25 +56,11 @@ def find_candidates(name: str, context: str = "") -> Candidates:
     """
     result = Candidates()
     query = name.strip()
+    officers: list[OfficerCandidate] = []
 
     # Companies House officers
     try:
         officers = ch.search_officers(query)
-        # Enrich the top few with a couple of company names for matching.
-        # One page each is enough for a preview; fetch in parallel to stay fast.
-        to_enrich = officers[:8]
-
-        def _enrich(officer: OfficerCandidate) -> None:
-            try:
-                _, top = ch.get_officer_appointments(officer.officer_id, max_items=6)
-                officer.top_companies = top
-            except ch.CompaniesHouseError:
-                pass  # keep the candidate; just without company enrichment
-
-        if to_enrich:
-            with ThreadPoolExecutor(max_workers=6) as pool:
-                list(pool.map(_enrich, to_enrich))
-        result.officers = officers
     except ch.CompaniesHouseError as exc:
         result.errors.append(str(exc))
 
@@ -85,6 +73,54 @@ def find_candidates(name: str, context: str = "") -> Candidates:
             result.wiki = wiki.search(query)
     except wiki.WikipediaError as exc:
         result.errors.append(str(exc))
+
+    # Pull the birth year AND the registered full name from the best-matching
+    # Wikipedia page. Birth year links the right Companies House record (avoiding
+    # namesakes); the full name lets us re-search CH when the user typed a
+    # nickname (e.g. "Nick" -> "Nicholas Anthony Christopher Candy").
+    lead_name: Optional[str] = None
+    bw = prospecting.best_wiki_index(result.wiki, query)
+    if bw is not None:
+        try:
+            summary = wiki.get_summary(result.wiki[bw].title)
+            if summary:
+                result.birth_year = prospecting.extract_birth_year(
+                    summary.description or ""
+                ) or prospecting.extract_birth_year(summary.extract or "")
+                lead_name = prospecting.extract_lead_name(summary.extract or "")
+        except wiki.WikipediaError:
+            pass
+
+    # If the typed query didn't surface a confident person in Companies House but
+    # Wikipedia gave us a fuller registered name, search CH again by that name and
+    # merge in anything new (deduped by officer id).
+    if (
+        lead_name
+        and lead_name.lower() != query.lower()
+        and prospecting.best_officer_index(officers, query, result.birth_year) is None
+    ):
+        try:
+            seen_ids = {o.officer_id for o in officers}
+            for extra in ch.search_officers(lead_name):
+                if extra.officer_id not in seen_ids:
+                    officers.append(extra)
+                    seen_ids.add(extra.officer_id)
+        except ch.CompaniesHouseError:
+            pass
+
+    # Enrich the top officers with a couple of company names for at-a-glance
+    # matching. Done once over the merged list, in parallel to stay fast.
+    def _enrich(officer: OfficerCandidate) -> None:
+        try:
+            _, top = ch.get_officer_appointments(officer.officer_id, max_items=6)
+            officer.top_companies = top
+        except ch.CompaniesHouseError:
+            pass
+
+    if officers:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(_enrich, officers[:10]))
+    result.officers = officers
 
     return result
 
