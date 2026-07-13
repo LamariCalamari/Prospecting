@@ -144,6 +144,11 @@ def build_one_sheet(
                         profile.charges = ch.get_charges(num)
                     except ch.CompaniesHouseError:
                         pass
+            # The PSC endpoint doesn't return the company name; backfill it from
+            # the profile so ownership stakes read "Revolut Ltd", not "08804411".
+            if profile and psc:
+                for entry in psc:
+                    entry.company_name = profile.company_name
             return profile, psc
 
         if company_numbers:

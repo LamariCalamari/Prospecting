@@ -6,6 +6,7 @@ every fact with a source link, matching the on-screen sheet.
 """
 from __future__ import annotations
 
+from core import prospecting
 from core.models import OneSheet
 
 # fpdf2's core fonts are Latin-1 only. Map the common "smart" punctuation that
@@ -37,6 +38,33 @@ def to_markdown(sheet: OneSheet) -> str:
     lines.append(
         "> Every fact below is attributed to its source. Blank fields mean the "
         "source returned nothing — nothing here is inferred or estimated."
+    )
+    lines.append("")
+
+    # Prospecting snapshot
+    sig = prospecting.derive_signals(sheet, sheet.confirmed_name)
+    lines.append("## Prospecting snapshot")
+    lines.append(f"- **Net worth (published):** {sig.net_worth or '—'}")
+    stake = sig.top_ownership or (
+        f"{sig.top_former_ownership} (former)" if sig.top_former_ownership else "—"
+    )
+    lines.append(f"- **Largest disclosed stake:** {stake}")
+    lines.append(f"- **Active directorships:** {sig.active_directorships}")
+    lines.append(f"- **Companies controlled (PSC):** {len(sig.stakes)} current, "
+                 f"{len(sig.former_stakes)} former")
+    if sig.companies_with_charges:
+        lines.append(f"- **Companies with registered charges (debt):** {sig.companies_with_charges}")
+    if sig.insolvency_companies:
+        lines.append(f"- **Companies with insolvency history:** {sig.insolvency_companies}")
+    links = []
+    if sig.linkedin_url:
+        links.append(f"[LinkedIn (verified)]({sig.linkedin_url})")
+    links.append(f"[Search LinkedIn]({sig.linkedin_search_url})")
+    links.append(f"[Google → LinkedIn]({sig.google_linkedin_url})")
+    lines.append("- **Find online:** " + " · ".join(links))
+    lines.append(
+        "_Net worth shows only when published. Stake = Companies House PSC band, "
+        "verbatim. Free sources don't provide company valuations._"
     )
     lines.append("")
 

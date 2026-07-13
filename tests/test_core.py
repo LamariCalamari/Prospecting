@@ -4,7 +4,7 @@ Run from the project root:  python -m unittest discover -s tests
 """
 import unittest
 
-from core import assembly, export
+from core import assembly, export, prospecting
 from core.models import (
     Appointment,
     CompanyInfo,
@@ -12,6 +12,7 @@ from core.models import (
     OfficerCandidate,
     OneSheet,
     PSC,
+    WikidataFacts,
     WikiSummary,
 )
 from sources import companies_house as ch
@@ -124,6 +125,52 @@ class TestExport(unittest.TestCase):
         self.assertNotIn("?", out)
         self.assertIn('"hi"', out)
         self.assertIn("don't", out)
+
+
+class TestProspectingSignals(unittest.TestCase):
+    def test_humanize_control_band(self):
+        self.assertEqual(
+            prospecting.humanize_control("ownership-of-shares-75-to-100-percent"),
+            "Ownership of shares 75–100%",
+        )
+        self.assertEqual(
+            prospecting.humanize_control("significant-influence-or-control"),
+            "Significant influence or control",
+        )
+
+    def test_names_match_handles_order_and_titles(self):
+        self.assertTrue(prospecting.names_match("STORONSKY Nikolay", "Nikolay Storonsky"))
+        self.assertTrue(prospecting.names_match("Mr Nikolay Storonsky", "Nikolay Storonsky"))
+        self.assertFalse(prospecting.names_match("Jane Smith", "John Doe"))
+
+    def test_derive_signals_picks_top_stake_and_matches_person(self):
+        sheet = OneSheet(
+            confirmed_name="Jane Example",
+            appointments=[
+                Appointment("ACME LTD", "1", "director", "active"),
+                Appointment("OLD LTD", "2", "director", "resigned"),
+            ],
+            psc_filings=[
+                PSC("ACME LTD", "1", "Jane Example", "individual",
+                    ["ownership-of-shares-25-to-50-percent"]),
+                PSC("BIGCO LTD", "3", "Jane Example", "individual",
+                    ["ownership-of-shares-75-to-100-percent"]),
+                PSC("OTHER LTD", "4", "Someone Else", "individual",
+                    ["ownership-of-shares-75-to-100-percent"]),
+            ],
+            companies=[CompanyInfo("ACME LTD", "1", has_charges=True)],
+            wikidata=WikidataFacts(qid="Q1", source_url="http://wd",
+                                   net_worth="1,000,000 pound", linkedin="http://li/jane"),
+        )
+        sig = prospecting.derive_signals(sheet, "Jane Example")
+        self.assertEqual(sig.active_directorships, 1)
+        self.assertEqual(sig.resigned_directorships, 1)
+        self.assertEqual(len(sig.stakes), 2)  # excludes "Someone Else"
+        self.assertEqual(sig.top_ownership, "Ownership of shares 75–100%")
+        self.assertEqual(sig.companies_with_charges, 1)
+        self.assertEqual(sig.net_worth, "1,000,000 pound")
+        self.assertEqual(sig.linkedin_url, "http://li/jane")
+        self.assertIn("linkedin.com", sig.linkedin_search_url)
 
 
 if __name__ == "__main__":
