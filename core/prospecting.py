@@ -83,7 +83,8 @@ class OwnershipStake:
 @dataclass
 class PersonSignals:
     """At-a-glance prospecting signals, all derived from sourced facts."""
-    active_directorships: int = 0
+    active_directorships: int = 0      # live role at a live company
+    dissolved_directorships: int = 0   # unresigned role, but company dissolved
     resigned_directorships: int = 0
     stakes: list[OwnershipStake] = field(default_factory=list)        # current
     former_stakes: list[OwnershipStake] = field(default_factory=list)  # ceased
@@ -95,6 +96,40 @@ class PersonSignals:
     linkedin_url: Optional[str] = None   # verified handle from Wikidata
     linkedin_search_url: str = ""        # deep-link to LinkedIn people search
     google_linkedin_url: str = ""        # Google fallback: site:linkedin.com/in
+
+
+def company_case(name: str) -> str:
+    """'CANDY & CANDY HOLDINGS LIMITED' -> 'Candy & Candy Holdings Limited'.
+
+    Words of 1–3 letters that arrive fully uppercase (NC, UBS, C&C) are kept
+    as-is — they're usually initials or tickers, not words.
+    """
+    def fix_run(m: re.Match) -> str:
+        run = m.group(0)
+        if run.lower() in ("the", "of", "and", "for", "to"):
+            return run.capitalize() if m.start() == 0 else run.lower()
+        if run.isupper() and len(run) <= 3:
+            return run  # initials/ticker: NC, UBS, C, AR
+        return run[0].upper() + run[1:].lower()
+
+    return re.sub(r"[A-Za-z]+", fix_run, name or "")
+
+
+def role_case(role: Optional[str]) -> str:
+    """'llp-designated-member' -> 'LLP Designated Member'."""
+    text = (role or "officer").replace("-", " ").title()
+    return re.sub(r"\bLlp\b", "LLP", text)
+
+
+def short_band(humanized: Optional[str]) -> Optional[str]:
+    """'Ownership of shares 75–100%' -> '75–100% shares' (fits a metric tile)."""
+    if not humanized:
+        return None
+    m = re.search(r"(\d+–\d+%|\bmore than \d+%)", humanized)
+    if not m:
+        return humanized
+    kind = "shares" if "share" in humanized.lower() else "voting"
+    return f"{m.group(1)} {kind}"
 
 
 def humanize_control(nature: str) -> str:
@@ -174,6 +209,84 @@ def best_officer_index(
     return None  # ambiguous — let the user choose by birth year
 
 
+@dataclass
+class OfficerGroup:
+    """Several CH officer records that are (very likely) the same human.
+
+    Companies House fragments one person across many officer ids; showing the
+    raw fragments makes the disambiguation screen unreadable. A group carries
+    one representative record (the one with the most appointments) plus the
+    merged at-a-glance info for its card.
+    """
+    primary: object                      # OfficerCandidate to confirm with
+    records: list = field(default_factory=list)
+    birth_year: Optional[str] = None     # "1973" or None when no record has one
+    total_appointments: int = 0
+    top_companies: list[str] = field(default_factory=list)
+
+
+def group_officers(officers) -> list[OfficerGroup]:
+    """Collapse fragmented CH officer records into one group per person.
+
+    Records join a group when the canonical name tokens are identical and the
+    birth dates don't conflict (a record with no birth date joins the group of
+    the same name that already has one). Groups are ordered by total
+    appointment count, so the most substantial person comes first.
+    """
+    groups: list[OfficerGroup] = []
+    keyed: dict[tuple, list[OfficerGroup]] = {}
+    for off in officers:
+        tokens = frozenset(_canon(t) for t in _name_tokens(off.name or ""))
+        year = (off.date_of_birth or "")[:4] or None
+        bucket = keyed.setdefault(tokens, [])
+        target = None
+        for g in bucket:
+            if g.birth_year is None or year is None or g.birth_year == year:
+                target = g
+                break
+        if target is None:
+            target = OfficerGroup(primary=off, birth_year=year)
+            bucket.append(target)
+            groups.append(target)
+        target.records.append(off)
+        if target.birth_year is None:
+            target.birth_year = year
+        target.total_appointments += off.appointment_count or 0
+        for name in off.top_companies:
+            if name not in target.top_companies:
+                target.top_companies.append(name)
+        # The fattest record becomes the group's representative.
+        if (off.appointment_count or 0) > (target.primary.appointment_count or 0):
+            target.primary = off
+    groups.sort(key=lambda g: g.total_appointments, reverse=True)
+    return groups
+
+
+def best_group_index(
+    groups: list[OfficerGroup], query: str, birth_year: Optional[str] = None
+) -> Optional[int]:
+    """Group to pre-select on the disambiguation screen, or None if unsure.
+
+    With a known birth year (from Wikipedia), pick the name-matching group born
+    that year. Without one, pick the only name-matching group — if several
+    people share the name, return None and let the user decide.
+    """
+    matches = [
+        (i, g) for i, g in enumerate(groups)
+        if names_match(g.primary.name or "", query)
+    ]
+    if not matches:
+        return None
+    if birth_year:
+        by_year = [(i, g) for i, g in matches if g.birth_year == str(birth_year)]
+        if by_year:
+            # groups are pre-sorted by substance; take the fattest match
+            return by_year[0][0]
+    if len(matches) == 1:
+        return matches[0][0]
+    return None
+
+
 def best_wiki_index(candidates, query: str) -> Optional[int]:
     """Index of the first Wikipedia candidate whose title matches `query`."""
     for i, cand in enumerate(candidates):
@@ -206,10 +319,19 @@ def derive_signals(sheet: OneSheet, person_name: str) -> PersonSignals:
     """Compute prospecting signals from the already-assembled, sourced facts."""
     sig = PersonSignals()
 
-    sig.active_directorships = sum(1 for a in sheet.appointments if a.status == "active")
-    sig.resigned_directorships = sum(
-        1 for a in sheet.appointments if a.status == "resigned"
-    )
+    # "Active" must mean a live role at a live company. An unresigned role at a
+    # dissolved company is history, not a current position — counting it makes
+    # the headline number read wrong. Companies without a fetched profile get
+    # the benefit of the doubt.
+    status_by_number = {c.company_number: (c.status or "").lower() for c in sheet.companies}
+    for a in sheet.appointments:
+        comp_status = status_by_number.get(a.company_number, "")
+        if a.status == "active" and comp_status in ("", "active", "open"):
+            sig.active_directorships += 1
+        elif a.status == "active":
+            sig.dissolved_directorships += 1
+        else:
+            sig.resigned_directorships += 1
 
     # Ownership stakes: PSC entries whose name matches the confirmed person.
     # Current (not ceased) and former (ceased) are tracked separately — a ceased

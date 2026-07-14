@@ -233,6 +233,55 @@ class TestAutoSelect(unittest.TestCase):
         self.assertEqual(prospecting.best_wiki_index(cands, "Nick Candy"), 1)
 
 
+class TestDisplayHelpers(unittest.TestCase):
+    def test_company_case_keeps_short_acronyms(self):
+        self.assertEqual(
+            prospecting.company_case("CANDY & CANDY HOLDINGS LIMITED"),
+            "Candy & Candy Holdings Limited",
+        )
+        self.assertEqual(
+            prospecting.company_case("NC (LONDON) LIMITED"), "NC (London) Limited"
+        )
+        self.assertEqual(prospecting.company_case("49 UBS LIMITED"), "49 UBS Limited")
+
+    def test_short_band(self):
+        self.assertEqual(
+            prospecting.short_band("Ownership of shares 75–100%"), "75–100% shares"
+        )
+        self.assertIsNone(prospecting.short_band(None))
+
+
+class TestOfficerGrouping(unittest.TestCase):
+    def _off(self, name, dob=None, appts=None, oid="x"):
+        return OfficerCandidate(officer_id=oid, name=name, source_url="",
+                                date_of_birth=dob, appointment_count=appts)
+
+    def test_fragments_collapse_into_one_group(self):
+        officers = [
+            self._off("Nicholas Anthony Christopher CANDY", "1973-01", 1, "a"),
+            self._off("Nicholas Anthony Christopher CANDY", None, 1, "b"),
+            self._off("Nicholas Anthony Christopher CANDY", "1973-01", 45, "c"),
+            self._off("Nicholas Anthony Christopher CANDY", "1955-06", 7, "d"),
+        ]
+        groups = prospecting.group_officers(officers)
+        self.assertEqual(len(groups), 2)  # 1973 person (+dob-less) and 1955 person
+        main = groups[0]
+        self.assertEqual(main.birth_year, "1973")
+        self.assertEqual(len(main.records), 3)
+        self.assertEqual(main.primary.officer_id, "c")  # fattest record represents
+
+    def test_best_group_index_uses_birth_year(self):
+        officers = [
+            self._off("Nicholas CANDY", "1955-06", 7, "a"),
+            self._off("Nicholas CANDY", "1973-01", 1, "b"),
+        ]
+        groups = prospecting.group_officers(officers)
+        idx = prospecting.best_group_index(groups, "Nick Candy", "1973")
+        self.assertEqual(groups[idx].birth_year, "1973")
+        # Ambiguous without a year:
+        self.assertIsNone(prospecting.best_group_index(groups, "Nick Candy"))
+
+
 class TestValuation(unittest.TestCase):
     def test_band_to_range(self):
         self.assertEqual(

@@ -40,10 +40,8 @@ def reset_to_search():
 # --- Header -----------------------------------------------------------------
 st.title("🔎 Prospecting one-sheet")
 st.caption(
-    "Verified, link-rich research from Companies House (directorships, PSC, "
-    "filings, charges), Wikipedia, Wikidata, FCA register, Charity Commission, "
-    "OpenSanctions, The Gazette and news. Every fact is attributed; blanks mean "
-    "the source returned nothing. Nothing is inferred."
+    "Sourced research on UK-connected individuals: directorships, ownership, "
+    "wealth signals, regulatory record and news — every fact linked to its source."
 )
 
 if not config.companies_house_configured():
@@ -114,51 +112,54 @@ elif st.session_state.stage == "disambiguate":
     for err in cands.errors:
         st.warning(err, icon="⚠️")
 
-    # Smart defaults: pre-select the best-matching officer + Wikipedia page so
-    # the two columns line up on the same person automatically. Birth year (from
-    # the matched Wikipedia page) is used to pick the right Companies House record
-    # among namesakes. Radio index 0 is the "none" option, so add 1.
-    best_off = prospecting.best_officer_index(
-        cands.officers, st.session_state.name, cands.birth_year
+    # Companies House fragments one person across many officer records; group
+    # them so the user picks a *person*, not a filing fragment. The birth year
+    # from the matched Wikipedia page pre-selects the right namesake.
+    groups = prospecting.group_officers(cands.officers)
+    best_grp = prospecting.best_group_index(
+        groups, st.session_state.name, cands.birth_year
     )
     best_wiki = prospecting.best_wiki_index(cands.wiki, st.session_state.name)
-    officer_default = (best_off + 1) if best_off is not None else 0
+    group_default = (best_grp + 1) if best_grp is not None else 0
     wiki_default = (best_wiki + 1) if best_wiki is not None else 0
-    if cands.birth_year:
-        st.caption(f"↪ Wikipedia gives a birth year of **{cands.birth_year}** — "
-                   "used to match the right Companies House record.")
 
     col_ch, col_wiki = st.columns(2)
 
-    # --- Companies House officer choice ---
+    # --- Companies House person choice (grouped records) ---
     with col_ch:
         st.markdown("### Companies House")
-        officer_labels = ["— none / not in Companies House —"]
-        officer_map: dict[str, OfficerCandidate] = {}
-        for o in cands.officers:
-            bits = [o.name]
-            if o.date_of_birth:
-                bits.append(f"b. {o.date_of_birth}")
-            if o.appointment_count is not None:
-                bits.append(f"{o.appointment_count} appts")
+        group_labels = ["— none / not in Companies House —"]
+        group_map: dict[str, OfficerCandidate] = {}
+        for g in groups:
+            bits = [prospecting.company_case(g.primary.name)]
+            bits.append(f"b. {g.birth_year}" if g.birth_year else "birth year not filed")
+            n_appts = max(g.total_appointments, g.primary.appointment_count or 0)
+            if n_appts:
+                bits.append(f"{n_appts} appointment{'s' if n_appts != 1 else ''}")
             label = " · ".join(bits)
-            if o.top_companies:
-                label += f"  ↳ {', '.join(o.top_companies[:3])}"
-            officer_labels.append(label)
-            officer_map[label] = o
-        if not cands.officers:
-            st.caption("No Companies House officer matches.")
-        elif officer_default > 0:
-            st.caption("✅ auto-matched to this person — verify the birth year, change if wrong.")
-        else:
-            st.caption("⚠️ Several possible matches — pick the one with the correct birth year.")
-        officer_choice = st.radio(
-            "Select the officer",
-            officer_labels,
-            index=officer_default,
+            if g.top_companies:
+                shown = ", ".join(
+                    prospecting.company_case(c) for c in g.top_companies[:3]
+                )
+                label += f"  — {shown}"
+            group_labels.append(label)
+            group_map[label] = g.primary
+        if not groups:
+            st.caption("No Companies House matches.")
+        elif group_default > 0 and cands.birth_year:
+            st.caption(
+                f"✅ Auto-matched by birth year **{cands.birth_year}** (from "
+                "Wikipedia). Change it if this isn't the right person."
+            )
+        elif len(groups) > 1:
+            st.caption("Several people share this name — pick by birth year / companies.")
+        group_choice = st.radio(
+            "Select the person",
+            group_labels,
+            index=group_default,
             label_visibility="collapsed",
         )
-        chosen_officer = officer_map.get(officer_choice)
+        chosen_officer = group_map.get(group_choice)
         if chosen_officer:
             st.markdown(
                 f"[View on Companies House ↗]({chosen_officer.source_url})"
@@ -169,12 +170,19 @@ elif st.session_state.stage == "disambiguate":
     # --- Wikipedia choice ---
     with col_wiki:
         st.markdown("### Wikipedia")
+        # Name-matching pages first; unrelated full-text hits ("Candy cane")
+        # are noise — hide them whenever a real match exists.
+        matching = [w for w in cands.wiki
+                    if prospecting.names_match(w.title, st.session_state.name)]
+        others = [w for w in cands.wiki if w not in matching]
+        shown_wiki = matching if matching else cands.wiki
         wiki_labels = ["— none / no confident match —"]
         wiki_map = {}
-        for w in cands.wiki:
-            label = w.title
-            wiki_labels.append(label)
-            wiki_map[label] = w
+        for w in shown_wiki:
+            wiki_labels.append(w.title)
+            wiki_map[w.title] = w
+        if matching:
+            wiki_default = 1 if best_wiki is not None else 0
         if not cands.wiki:
             st.caption("No Wikipedia matches.")
         wiki_choice = st.radio(
@@ -183,6 +191,8 @@ elif st.session_state.stage == "disambiguate":
             index=wiki_default,
             label_visibility="collapsed",
         )
+        if matching and others:
+            st.caption(f"{len(others)} unrelated search results hidden.")
         chosen_wiki = wiki_map.get(wiki_choice)
         if chosen_wiki:
             st.markdown(f"[Open Wikipedia page ↗]({chosen_wiki.url})")
@@ -242,51 +252,59 @@ elif st.session_state.stage == "sheet":
             reset_to_search()
             st.rerun()
 
-    # --- Prospecting snapshot (metric tiles) ---
-    st.markdown("#### 🎯 Prospecting snapshot")
-    m = st.columns(5)
-    m[0].metric("Net worth (published)", sig.net_worth or "—")
-    stake_val = sig.top_ownership or (
-        f"{sig.top_former_ownership} (former)" if sig.top_former_ownership else "—"
+    # --- Prospecting snapshot: only tiles that actually have data ---
+    tiles: list[tuple[str, str, str]] = []  # (label, value, help)
+    if sig.net_worth:
+        tiles.append(("Net worth (published)", sig.net_worth,
+                      "As published on Wikidata, verbatim."))
+    band_short = prospecting.short_band(sig.top_ownership) or (
+        f"{prospecting.short_band(sig.top_former_ownership)} (former)"
+        if sig.top_former_ownership else None
     )
-    m[1].metric("Largest disclosed stake", stake_val)
+    if band_short:
+        tiles.append(("Largest disclosed stake", band_short,
+                      "Companies House PSC band — a filed range, not computed."))
     if est.counted:
-        book_val = f"{valuation.fmt_gbp(est.total_lo)}–{valuation.fmt_gbp(est.total_hi)}"
-    else:
-        book_val = "—"
-    m[2].metric(
-        "Est. stake value (book)",
-        book_val,
-        help="Sum over disclosed stakes of PSC band × net assets from the "
-             "latest filed accounts. A conservative floor — see the 💰 tab.",
-    )
-    m[3].metric("Active directorships", sig.active_directorships or "—")
-    m[4].metric("Companies controlled", len(sig.stakes) or "—")
+        tiles.append((
+            "UK filed equity (floor)",
+            f"{valuation.fmt_gbp(est.total_lo)}–{valuation.fmt_gbp(est.total_hi)}",
+            "Stake band × net assets from latest UK filed accounts, summed. A "
+            "conservative floor covering UK filings only — NOT total wealth. "
+            "See the 💰 Stake value tab for the full working.",
+        ))
+    tiles.append(("Active directorships", str(sig.active_directorships),
+                  "Live roles at live companies (dissolved companies excluded)."))
+    if sig.stakes:
+        tiles.append(("Companies controlled", str(len(sig.stakes)),
+                      "Current PSC filings naming this person."))
+    cols = st.columns(len(tiles))
+    for col, (label, value, help_text) in zip(cols, tiles):
+        col.metric(label, value, help=help_text)
+
     flags = []
     if sig.companies_with_charges:
-        flags.append(f"💷 {sig.companies_with_charges} co. with registered charges (debt)")
+        flags.append(f"{sig.companies_with_charges} companies with registered charges")
     if sig.insolvency_companies:
-        flags.append(f"⚠️ {sig.insolvency_companies} co. with insolvency history")
+        flags.append(f"{sig.insolvency_companies} with insolvency history")
+    if sig.dissolved_directorships:
+        flags.append(f"{sig.dissolved_directorships} roles at dissolved companies")
     if sig.resigned_directorships:
-        flags.append(f"⚪ {sig.resigned_directorships} past directorships")
+        flags.append(f"{sig.resigned_directorships} resigned roles")
     if flags:
-        st.caption(" · ".join(flags))
-    st.caption(
-        "Net worth shows only when published (Wikidata). Stake = Companies House "
-        "PSC band, verbatim. Free sources don't provide company valuations — the "
-        "signals here are the sourced facts to base your own judgement on."
-    )
+        st.caption("Also on file: " + " · ".join(flags) + ".")
 
-    # --- Quick lookups: LinkedIn + verified links ---
+    # --- Quick lookups ---
     link_bits = []
     if sig.linkedin_url:
-        link_bits.append(f"[✓ LinkedIn (verified) ↗]({sig.linkedin_url})")
-    link_bits.append(f"[🔎 Search LinkedIn ↗]({sig.linkedin_search_url})")
-    link_bits.append(f"[🔎 Google → LinkedIn ↗]({sig.google_linkedin_url})")
+        link_bits.append(f"[LinkedIn (verified) ↗]({sig.linkedin_url})")
+    else:
+        link_bits.append(f"[Find on LinkedIn ↗]({sig.google_linkedin_url})")
     if wd and wd.official_website:
-        link_bits.append(f"[🌐 Official website ↗]({wd.official_website})")
+        link_bits.append(f"[Website ↗]({wd.official_website})")
     if wd and wd.twitter:
         link_bits.append(f"[X/Twitter ↗]({wd.twitter})")
+    if sheet.wiki:
+        link_bits.append(f"[Wikipedia ↗]({sheet.wiki.url})")
     st.markdown(" · ".join(link_bits))
 
     st.divider()
@@ -299,18 +317,33 @@ elif st.session_state.stage == "sheet":
     # ========================= OVERVIEW =========================
     with tab_overview:
         st.markdown("### Position")
-        active = [a for a in sheet.appointments if a.status == "active"]
-        if active:
-            for a in active[:5]:
-                role = (a.officer_role or "officer").title()
-                st.markdown(
-                    f"- **{role}**, {a.company_name} "
-                    f"(appointed {a.appointed_on or '—'}) "
-                    f"· [Companies House ↗]({a.source_url})"
-                )
         if sheet.wiki and sheet.wiki.description:
-            st.markdown(f"- {sheet.wiki.description} · [Wikipedia ↗]({sheet.wiki.url})")
-        if not active and not (sheet.wiki and sheet.wiki.description):
+            st.markdown(
+                f"**{sheet.wiki.description.capitalize()}** "
+                f"· [Wikipedia ↗]({sheet.wiki.url})"
+            )
+        # Current roles: live company only, most recent first.
+        status_by_num = {c.company_number: (c.status or "").lower()
+                         for c in sheet.companies}
+        live_roles = [
+            a for a in sheet.appointments
+            if a.status == "active"
+            and status_by_num.get(a.company_number, "active") in ("", "active", "open")
+        ]
+        live_roles.sort(key=lambda a: a.appointed_on or "", reverse=True)
+        for a in live_roles[:5]:
+            st.markdown(
+                f"- **{prospecting.role_case(a.officer_role)}**, "
+                f"{prospecting.company_case(a.company_name)} "
+                f"(since {a.appointed_on or '—'}) "
+                f"· [Companies House ↗]({a.source_url})"
+            )
+        if len(live_roles) > 5:
+            st.caption(
+                f"+ {len(live_roles) - 5} more current roles — see the "
+                "🏢 Directorships tab."
+            )
+        if not live_roles and not (sheet.wiki and sheet.wiki.description):
             st.caption("No current position data returned.")
 
         st.markdown("### Background")
@@ -357,29 +390,48 @@ elif st.session_state.stage == "sheet":
             for s in sig.stakes:
                 controls = "; ".join(s.controls) if s.controls else "control not specified"
                 st.markdown(
-                    f"- 🟢 **{s.company_name}** ({s.company_number}) — {controls} "
-                    f"· [CH PSC ↗]({s.source_url})"
+                    f"- 🟢 **{prospecting.company_case(s.company_name)}** "
+                    f"({s.company_number}) — {controls} · [CH PSC ↗]({s.source_url})"
                 )
             for s in sig.former_stakes:
                 controls = "; ".join(s.controls) if s.controls else "control not specified"
                 st.markdown(
-                    f"- ⚪ **{s.company_name}** ({s.company_number}) — {controls} "
+                    f"- ⚪ **{prospecting.company_case(s.company_name)}** "
+                    f"({s.company_number}) — {controls} "
                     f"— _former, ceased {s.ceased_on}_ · [CH PSC ↗]({s.source_url})"
                 )
             st.divider()
 
         st.markdown("### Appointments")
         if sheet.appointments:
-            st.caption("source: Companies House")
-            for a in sheet.appointments:
+            st.caption("Source: Companies House. Newest first.")
+            comp_status = {c.company_number: (c.status or "").lower()
+                           for c in sheet.companies}
+            ordered = sorted(
+                sheet.appointments,
+                key=lambda a: (a.status == "resigned", a.appointed_on or ""),
+            )
+            ordered = (
+                sorted([a for a in ordered if a.status == "active"],
+                       key=lambda a: a.appointed_on or "", reverse=True)
+                + sorted([a for a in ordered if a.status != "active"],
+                         key=lambda a: a.appointed_on or "", reverse=True)
+            )
+            for a in ordered:
                 dates = a.appointed_on or "—"
                 if a.resigned_on:
                     dates += f" → {a.resigned_on}"
-                role = a.officer_role or "officer"
-                badge = "🟢 active" if a.status == "active" else "⚪ resigned"
+                role = prospecting.role_case(a.officer_role)
+                cstat = comp_status.get(a.company_number, "")
+                if a.status == "active" and cstat in ("", "active", "open"):
+                    badge = "🟢"
+                elif a.status == "active":
+                    badge = f"🏚 company {cstat or 'closed'}"
+                else:
+                    badge = "⚪ resigned"
                 st.markdown(
-                    f"- {badge} · **{a.company_name}** — {role}; {dates} "
-                    f"· [CH ↗]({a.source_url})"
+                    f"- {badge} · **{prospecting.company_case(a.company_name)}** "
+                    f"— {role}; {dates} · [CH ↗]({a.source_url})"
                 )
         else:
             st.caption("No directorships returned.")
@@ -400,56 +452,66 @@ elif st.session_state.stage == "sheet":
     # ========================= STAKE VALUE =========================
     with tab_value:
         st.markdown("### Estimated stake value")
-        st.markdown(
-            "**Method:** `disclosed stake band (Companies House PSC) × company "
-            "value`. Every input is shown and linked; the result is an "
-            "**estimate range**, not a fact."
-        )
         st.caption(
-            "Company value basis: **book value** (net assets from the latest "
-            "filed accounts). This is a conservative floor — a profitable or "
-            "high-growth company is usually worth a multiple of book, and UK "
-            "SPV/holding-company accounts often exclude wealth held in other "
-            "structures. For a market-basis estimate, use the calculator below "
-            "with a valuation you know (e.g. from funding-round coverage)."
+            "Method: disclosed stake band (Companies House PSC) × company value. "
+            "Estimates, not facts — every input is shown and linked."
         )
         if est.counted:
             st.metric(
-                "Total estimated stake value (book-value floor)",
+                "UK filed equity (book-value floor)",
                 f"{valuation.fmt_gbp(est.total_lo)} – {valuation.fmt_gbp(est.total_hi)}",
+                help="Net assets from latest UK filed accounts × stake band, "
+                     "summed. A floor, not total wealth: book value understates "
+                     "growth companies, and offshore/unfiled wealth is invisible "
+                     "to UK accounts.",
             )
         if est.stakes:
-            st.markdown("#### Per-company breakdown")
-            for s in est.stakes:
+            # Material holdings up front; £2-share-capital shells and other
+            # nominal entries collapse into one line so they don't read as
+            # findings.
+            _MATERIAL = 10_000  # GBP
+            material = [
+                s for s in est.stakes
+                if (s.value_hi or 0) >= _MATERIAL
+                or (s.net_assets is not None and abs(s.net_assets) >= _MATERIAL)
+                or s.net_assets is None
+            ]
+            nominal = [s for s in est.stakes if s not in material]
+
+            st.markdown("#### Holdings")
+            for s in material:
                 band = f"{s.stake_lo:.0%}–{s.stake_hi:.0%}"
+                cname = prospecting.company_case(s.company_name)
                 if s.net_assets is not None:
-                    date = f", accounts to {s.accounts_date}" if s.accounts_date else ""
+                    date = f" (accounts to {s.accounts_date})" if s.accounts_date else ""
                     st.markdown(
-                        f"- **{s.company_name}** — {band} × net assets "
-                        f"{valuation.fmt_gbp(s.net_assets)}{date} = "
+                        f"- **{cname}** — {band} of net assets "
+                        f"{valuation.fmt_gbp(s.net_assets)}{date} → "
                         f"**{valuation.fmt_gbp(s.value_lo)}–{valuation.fmt_gbp(s.value_hi)}** "
                         f"· [CH ↗]({s.source_url})"
                     )
                 else:
                     st.markdown(
-                        f"- **{s.company_name}** — {band} × *accounts not "
-                        f"machine-readable (older/paper filing)* "
-                        f"· [CH ↗]({s.source_url})"
+                        f"- **{cname}** — {band} held · paper-filed accounts — "
+                        f"[open filings ↗]({s.source_url})"
                     )
-            if est.missing:
+            if nominal:
+                names = ", ".join(
+                    prospecting.company_case(s.company_name) for s in nominal
+                )
                 st.caption(
-                    f"{est.missing} stake(s) have no parseable accounts — open the "
-                    "Companies House link to read the filed PDF accounts directly."
+                    f"Plus {len(nominal)} nominal holding(s) (≈£0 book value — "
+                    f"dormant/shell entities): {names}."
                 )
 
             st.markdown("#### Market-basis calculator")
             st.caption(
-                "Know a market valuation from press coverage or a funding round? "
-                "Apply this person's disclosed stake band to it. The valuation is "
-                "your input — the app never invents one."
+                "Know a market valuation (funding round, press)? Apply the "
+                "disclosed stake band to it — your figure, their filed stake."
             )
             calc_options = {
-                f"{s.company_name} ({s.stake_lo:.0%}–{s.stake_hi:.0%})": s
+                f"{prospecting.company_case(s.company_name)} "
+                f"({s.stake_lo:.0%}–{s.stake_hi:.0%})": s
                 for s in est.stakes
             }
             pick = st.selectbox("Company", list(calc_options.keys()))
@@ -461,21 +523,22 @@ elif st.session_state.stage == "sheet":
                 s = calc_options[pick]
                 lo, hi = valuation.apply_market_valuation(s, mv * 1e6)
                 st.success(
-                    f"Estimated holding in {s.company_name}: "
+                    f"Estimated holding in "
+                    f"{prospecting.company_case(s.company_name)}: "
                     f"**{valuation.fmt_gbp(lo)} – {valuation.fmt_gbp(hi)}** "
                     f"({s.stake_lo:.0%}–{s.stake_hi:.0%} of £{mv:,.0f}m — your figure)"
                 )
         else:
             st.caption(
                 "No disclosed share-ownership stakes to value (select a Companies "
-                "House officer, or this person holds no PSC share bands)."
+                "House person, or none are filed)."
             )
 
     # ========================= COMPANIES =========================
     with tab_companies:
         if sheet.companies:
             for c in sheet.companies:
-                bits = [f"**{c.company_name}** ({c.company_number})"]
+                bits = [f"**{prospecting.company_case(c.company_name)}** ({c.company_number})"]
                 if c.status:
                     bits.append(f"status: {c.status}")
                 if c.incorporation_date:
