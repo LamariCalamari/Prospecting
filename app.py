@@ -216,7 +216,7 @@ elif st.session_state.stage == "disambiguate":
                 "person."
             )
         else:
-            with st.spinner("Assembling one-sheet…"):
+            with st.status("Assembling one-sheet…", expanded=True) as status:
                 st.session_state.sheet = assembly.build_one_sheet(
                     confirmed_name=(
                         chosen_wiki.title if chosen_wiki else chosen_officer.name
@@ -225,7 +225,9 @@ elif st.session_state.stage == "disambiguate":
                     wiki_title=chosen_wiki.title if chosen_wiki else None,
                     context=st.session_state.context,
                     include_news=True,
+                    progress=st.write,
                 )
+                status.update(label="One-sheet ready", state="complete")
             st.session_state.stage = "sheet"
             st.rerun()
 
@@ -537,88 +539,159 @@ elif st.session_state.stage == "sheet":
     # ========================= COMPANIES =========================
     with tab_companies:
         if sheet.companies:
-            for c in sheet.companies:
-                bits = [f"**{prospecting.company_case(c.company_name)}** ({c.company_number})"]
-                if c.status:
-                    bits.append(f"status: {c.status}")
-                if c.incorporation_date:
-                    bits.append(f"incorporated: {c.incorporation_date}")
-                st.markdown("- " + ", ".join(bits) + f" · [Companies House ↗]({c.source_url})")
+            import pandas as pd
 
-                signals = []
-                if c.accounts_last_made_up_to:
-                    signals.append(f"accounts to {c.accounts_last_made_up_to}")
-                if c.accounts_next_due:
-                    overdue = " ⚠️ overdue" if c.accounts_overdue else ""
-                    signals.append(f"next accounts due {c.accounts_next_due}{overdue}")
-                if c.has_charges:
-                    signals.append(f"{len(c.charges) or 'has'} charge(s)")
-                if c.has_insolvency_history:
-                    signals.append("⚠️ insolvency history")
-                if signals:
-                    st.markdown("&nbsp;&nbsp;&nbsp;↳ " + " · ".join(signals), unsafe_allow_html=True)
-                for ch_item in c.charges[:5]:
-                    cls = ch_item.classification or "charge"
-                    pe = f" to {', '.join(ch_item.persons_entitled)}" if ch_item.persons_entitled else ""
+            ordered_companies = sorted(
+                sheet.companies,
+                key=lambda c: ((c.status or "") != "active", c.company_name),
+            )
+            df = pd.DataFrame([
+                {
+                    "Company": prospecting.company_case(c.company_name),
+                    "Status": c.status or "—",
+                    "Incorporated": c.incorporation_date or "—",
+                    "Accounts to": c.accounts_last_made_up_to or "—",
+                    "Charges": len(c.charges) if c.charges else
+                               ("yes" if c.has_charges else ""),
+                    "Insolvency": "⚠️" if c.has_insolvency_history else "",
+                    "Companies House": c.source_url,
+                }
+                for c in ordered_companies
+            ])
+            st.caption(
+                f"{len(ordered_companies)} companies from this person's Companies "
+                "House record. Click a column header to sort."
+            )
+            st.dataframe(
+                df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Companies House": st.column_config.LinkColumn(
+                        "Companies House", display_text="open ↗"
+                    ),
+                },
+            )
+
+            # Deep-dive panel for one company at a time.
+            st.markdown("#### Inspect a company")
+            by_label = {
+                f"{prospecting.company_case(c.company_name)} ({c.company_number})": c
+                for c in ordered_companies
+            }
+            chosen = st.selectbox("Company", list(by_label.keys()),
+                                  label_visibility="collapsed")
+            c = by_label[chosen]
+            facts = [f"status: {c.status or '—'}",
+                     f"incorporated: {c.incorporation_date or '—'}"]
+            if c.accounts_next_due:
+                facts.append(
+                    f"next accounts due {c.accounts_next_due}"
+                    + (" ⚠️ overdue" if c.accounts_overdue else "")
+                )
+            if c.net_assets is not None:
+                facts.append(f"net assets {valuation.fmt_gbp(c.net_assets)}")
+            st.markdown(" · ".join(facts) + f" · [Companies House ↗]({c.source_url})")
+            for ch_item in c.charges[:8]:
+                cls = ch_item.classification or "charge"
+                pe = (f" to {', '.join(ch_item.persons_entitled)}"
+                      if ch_item.persons_entitled else "")
+                st.markdown(
+                    f"- {cls} — {ch_item.status or ''} "
+                    f"(created {ch_item.created_on or '—'}){pe} "
+                    f"· [charges ↗]({ch_item.source_url})"
+                )
+            if c.recent_filings:
+                st.markdown("**Recent filings**")
+                for f in c.recent_filings:
                     st.markdown(
-                        f"&nbsp;&nbsp;&nbsp;&nbsp;• {cls} — {ch_item.status or ''}"
-                        f" (created {ch_item.created_on or '—'}){pe} · [charges ↗]({ch_item.source_url})",
-                        unsafe_allow_html=True,
+                        f"- {f.date or '—'} · {f.description or f.category or 'filing'} "
+                        f"· [document ↗]({f.document_url})"
                     )
-                if c.recent_filings:
-                    with st.expander(f"Recent filings — {c.company_name}"):
-                        for f in c.recent_filings:
-                            st.markdown(
-                                f"- {f.date or '—'} · {f.description or f.category or 'filing'} "
-                                f"· [document ↗]({f.document_url})"
-                            )
+            if not c.charges and not c.recent_filings:
+                st.caption(
+                    "No deep-dive data fetched for this company (only the first "
+                    "few get filings/charges pulled) — use the Companies House "
+                    "link above."
+                )
         else:
             st.caption("No company profiles returned.")
 
     # ==================== REGULATORY & RISK ====================
     with tab_risk:
-        st.markdown("### Regulatory record (FCA)")
-        if sheet.fca_records:
-            st.caption("FCA Financial Services Register — verify identity before relying on a match.")
-            for r in sheet.fca_records:
-                status = f" · {r.status}" if r.status else ""
-                st.markdown(f"- **{r.name}** (IRN {r.reference_number or '—'}){status} · [FCA register ↗]({r.source_url})")
-                if r.roles:
-                    st.markdown(f"&nbsp;&nbsp;&nbsp;↳ roles: {', '.join(r.roles)}", unsafe_allow_html=True)
-                if r.firms:
-                    st.markdown(f"&nbsp;&nbsp;&nbsp;↳ firms: {', '.join(r.firms)}", unsafe_allow_html=True)
-        else:
-            st.caption("No FCA-approved individual matched (or FCA not configured — see notes below).")
+        # Only render sections that can say something. Unconfigured optional
+        # sources collapse into one line instead of three dead headers.
+        unconfigured = []
+        if not config.fca_configured():
+            unconfigured.append("FCA register")
+        if not config.charity_commission_configured():
+            unconfigured.append("Charity Commission")
+        if not config.opensanctions_configured():
+            unconfigured.append("OpenSanctions")
 
-        st.markdown("### Philanthropy (Charity Commission)")
-        if sheet.charities:
-            st.caption("Charities whose name matches — often catches eponymous foundations. Verify the link.")
-            for ch_rec in sheet.charities:
-                num = f" (no. {ch_rec.charity_number})" if ch_rec.charity_number else ""
-                status = f" · {ch_rec.status}" if ch_rec.status else ""
-                st.markdown(f"- **{ch_rec.name}**{num}{status} · [Charity register ↗]({ch_rec.source_url})")
-        else:
-            st.caption("No matching charities (or Charity Commission not configured — see notes below).")
+        st.caption(
+            "Screening leads for you to verify — a name match is NOT a "
+            "confirmed identification."
+        )
 
-        st.markdown("### Sanctions / PEP / official notices")
-        st.caption("Screening leads for you to verify — a name match is NOT a confirmed identification.")
-        if sheet.sanctions_hits:
-            st.markdown("**Sanctions / PEP / watchlist matches** — source: OpenSanctions")
-            for h in sheet.sanctions_hits:
-                topics = f" · {', '.join(h.topics)}" if h.topics else ""
-                ctry = f" · {', '.join(h.countries)}" if h.countries else ""
-                score = f" · score {h.score:.2f}" if isinstance(h.score, (int, float)) else ""
-                st.markdown(f"- **{h.name}** ({h.schema or '—'}){topics}{ctry}{score} · [OpenSanctions ↗]({h.source_url})")
-        else:
-            st.caption("No sanctions/PEP matches (or OpenSanctions not configured — see notes below).")
+        if sheet.fca_records or config.fca_configured():
+            st.markdown("### Regulatory record (FCA)")
+            if sheet.fca_records:
+                for r in sheet.fca_records:
+                    status = f" · {r.status}" if r.status else ""
+                    st.markdown(
+                        f"- **{r.name}** (IRN {r.reference_number or '—'}){status} "
+                        f"· [FCA register ↗]({r.source_url})"
+                    )
+                    if r.roles:
+                        st.caption(f"roles: {', '.join(r.roles)}")
+                    if r.firms:
+                        st.caption(f"firms: {', '.join(r.firms)}")
+            else:
+                st.caption("No FCA-approved individual matched this name.")
 
+        if sheet.charities or config.charity_commission_configured():
+            st.markdown("### Philanthropy (Charity Commission)")
+            if sheet.charities:
+                st.caption("Name-matching charities — often eponymous foundations. Verify the link.")
+                for ch_rec in sheet.charities:
+                    num = f" (no. {ch_rec.charity_number})" if ch_rec.charity_number else ""
+                    status = f" · {ch_rec.status}" if ch_rec.status else ""
+                    st.markdown(
+                        f"- **{ch_rec.name}**{num}{status} "
+                        f"· [Charity register ↗]({ch_rec.source_url})"
+                    )
+            else:
+                st.caption("No charities match this name.")
+
+        if sheet.sanctions_hits or config.opensanctions_configured():
+            st.markdown("### Sanctions / PEP screening")
+            if sheet.sanctions_hits:
+                for h in sheet.sanctions_hits:
+                    topics = f" · {', '.join(h.topics)}" if h.topics else ""
+                    ctry = f" · {', '.join(h.countries)}" if h.countries else ""
+                    score = f" · score {h.score:.2f}" if isinstance(h.score, (int, float)) else ""
+                    st.markdown(
+                        f"- **{h.name}** ({h.schema or '—'}){topics}{ctry}{score} "
+                        f"· [OpenSanctions ↗]({h.source_url})"
+                    )
+            else:
+                st.caption("No sanctions/PEP/watchlist matches.")
+
+        st.markdown("### Official notices (The Gazette)")
         if sheet.gazette_notices:
-            st.markdown("**Official notices** — source: The Gazette (insolvency, strike-off, legal)")
             for g in sheet.gazette_notices:
                 pub = f" · {g.published[:10]}" if g.published else ""
                 st.markdown(f"- [{g.title}]({g.link}){pub}")
         else:
-            st.caption("No Gazette notices matched.")
+            st.caption("No Gazette notices (insolvency, strike-off, legal) matched.")
+
+        if unconfigured:
+            st.info(
+                "Not yet enabled (free keys, add to secrets to switch on): "
+                + ", ".join(unconfigured) + ".",
+                icon="🔧",
+            )
 
     # ========================= NEWS =========================
     with tab_news:

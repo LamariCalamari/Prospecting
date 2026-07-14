@@ -187,17 +187,25 @@ def build_one_sheet(
     wiki_title: Optional[str],
     context: str = "",
     include_news: bool = True,
+    progress=None,
 ) -> OneSheet:
     """Assemble the full one-sheet for a *confirmed* person.
 
     Either an officer, a wiki_title, or both may be provided depending on what
     the user confirmed. Missing sources leave their sections blank.
+    `progress`, when given, is called with a short human label per stage so the
+    UI can show what the (30s+) build is doing.
     """
+    def _note(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+
     sheet = OneSheet(confirmed_name=confirmed_name, context=context)
 
     # --- Companies House: appointments, companies, PSC ---
     if officer is not None:
         sheet.officer = officer
+        _note("Merging Companies House officer records…")
         sheet.appointments = _merged_appointments(officer)
 
         # Deduplicate company numbers (preserving order), then fetch profile +
@@ -243,6 +251,7 @@ def build_one_sheet(
             return profile, psc
 
         if company_numbers:
+            _note(f"Fetching {len(company_numbers)} company profiles, PSC and charges…")
             with ThreadPoolExecutor(max_workers=8) as pool:
                 for profile, psc in pool.map(_fetch_company, company_numbers):
                     if profile:
@@ -267,6 +276,7 @@ def build_one_sheet(
                 stake_numbers.append(psc_item.company_number)
         stake_numbers = stake_numbers[:_ACCOUNTS_FETCH_LIMIT]
         if stake_numbers:
+            _note(f"Reading filed accounts for {len(stake_numbers)} stake companies…")
             by_number = {c.company_number: c for c in sheet.companies}
 
             def _fetch_accounts(num: str) -> None:
@@ -288,6 +298,7 @@ def build_one_sheet(
 
     # --- Wikipedia: confident summary only ---
     if wiki_title:
+        _note("Fetching Wikipedia summary…")
         try:
             summary = wiki.get_summary(wiki_title)
             if summary:
@@ -296,6 +307,7 @@ def build_one_sheet(
             pass
 
     # --- Person-level deep-dive sources (run concurrently) ---
+    _note("Wikidata, news, Gazette and screening sources…")
     _add_person_sources(sheet, confirmed_name, wiki_title, officer, context, include_news)
 
     return sheet
@@ -326,9 +338,15 @@ def _add_person_sources(
         if not include_news:
             return
         try:
-            sheet.news = news_source.search_news(
+            # A company-biased query is precise but often too narrow (the
+            # person's best-known company may not be their CH one). Fall back
+            # to the bare quoted name rather than showing an empty section.
+            items = news_source.search_news(
                 _news_query(confirmed_name, officer, context)
             )
+            if not items:
+                items = news_source.search_news(f'"{confirmed_name}"')
+            sheet.news = items
         except Exception:  # noqa: BLE001 - best-effort
             sheet.news = []
 
