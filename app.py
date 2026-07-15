@@ -26,6 +26,7 @@ _DEFAULTS = {
     "context": "",
     "context_fields": {},
     "candidates": None,
+    "people": None,
     "sheet": None,
 }
 for key, val in _DEFAULTS.items():
@@ -86,10 +87,12 @@ if st.session_state.stage == "search":
         st.session_state.context = ", ".join(
             v for v in st.session_state.context_fields.values() if v
         )
-        with st.spinner("Searching Companies House and Wikipedia…"):
-            st.session_state.candidates = assembly.find_candidates(
+        with st.spinner("Identifying likely people…"):
+            people, cands = assembly.find_people(
                 st.session_state.name, st.session_state.context
             )
+            st.session_state.people = people
+            st.session_state.candidates = cands
         st.session_state.stage = "disambiguate"
         st.rerun()
     elif submitted:
@@ -101,20 +104,90 @@ if st.session_state.stage == "search":
 # ============================================================================
 elif st.session_state.stage == "disambiguate":
     cands = st.session_state.candidates
-    st.subheader(f"Confirm who you mean: “{st.session_state.name}”")
-    st.info(
-        "We've **pre-selected the most likely match** in each column — check "
-        "they're the same person, adjust if not, then confirm. The one-sheet is "
-        "built **only** for what you select here.",
-        icon="✅",
-    )
+    people = st.session_state.people or []
+    st.subheader(f"Who do you mean by “{st.session_state.name}”?")
 
     for err in cands.errors:
         st.warning(err, icon="⚠️")
 
-    # Companies House fragments one person across many officer records; group
-    # them so the user picks a *person*, not a filing fragment. The birth year
-    # from the matched Wikipedia page pre-selects the right namesake.
+    def _build_sheet(officer, wiki_title, confirmed_name):
+        with st.status("Assembling one-sheet…", expanded=True) as status:
+            st.session_state.sheet = assembly.build_one_sheet(
+                confirmed_name=confirmed_name,
+                officer=officer,
+                wiki_title=wiki_title,
+                context=st.session_state.context,
+                include_news=True,
+                progress=st.write,
+            )
+            status.update(label="One-sheet ready", state="complete")
+        st.session_state.stage = "sheet"
+        st.rerun()
+
+    # --- Person cards: pick a human, one click builds the sheet ---
+    if people:
+        for i, p in enumerate(people):
+            with st.container(border=True):
+                c_img, c_txt, c_btn = st.columns([1, 6, 2])
+                with c_img:
+                    if p.thumbnail:
+                        st.image(p.thumbnail, width=72)
+                    else:
+                        st.markdown(
+                            "<div style='font-size:2.6rem;text-align:center'>👤</div>",
+                            unsafe_allow_html=True,
+                        )
+                with c_txt:
+                    title_bits = [f"**{p.display_name}**"]
+                    if p.birth_year:
+                        title_bits.append(f"b. {p.birth_year}")
+                    st.markdown(" · ".join(title_bits))
+                    if p.description:
+                        st.markdown(p.description.capitalize())
+                    detail_bits = []
+                    if p.n_appointments:
+                        detail_bits.append(
+                            f"{p.n_appointments} UK compan"
+                            f"{'ies' if p.n_appointments != 1 else 'y'} on record"
+                        )
+                    if p.top_companies:
+                        detail_bits.append(", ".join(
+                            prospecting.company_case(c) for c in p.top_companies[:3]
+                        ))
+                    srcs = []
+                    if p.has_wiki:
+                        srcs.append("Wikipedia ✓")
+                    srcs.append("Companies House ✓" if p.has_ch
+                                else "no Companies House match")
+                    detail_bits.append(" + ".join(srcs))
+                    st.caption(" — ".join(detail_bits))
+                with c_btn:
+                    if st.button(
+                        "Build one-sheet →",
+                        key=f"person_{i}",
+                        type="primary" if i == 0 else "secondary",
+                        use_container_width=True,
+                    ):
+                        _build_sheet(
+                            officer=p.officer,
+                            wiki_title=p.wiki_title,
+                            confirmed_name=p.display_name,
+                        )
+        if st.button("← Start over", key="restart_cards"):
+            reset_to_search()
+            st.rerun()
+    else:
+        st.warning(
+            "No likely person found automatically — use the manual selection "
+            "below.",
+            icon="🔍",
+        )
+        if st.button("← Start over", key="restart_nocards"):
+            reset_to_search()
+            st.rerun()
+
+    # --- Manual fallback: the source-by-source picker ---
+    manual = st.expander("Advanced: pick sources manually", expanded=not people)
     groups = prospecting.group_officers(cands.officers)
     best_grp = prospecting.best_group_index(
         groups, st.session_state.name, cands.birth_year
@@ -123,7 +196,7 @@ elif st.session_state.stage == "disambiguate":
     group_default = (best_grp + 1) if best_grp is not None else 0
     wiki_default = (best_wiki + 1) if best_wiki is not None else 0
 
-    col_ch, col_wiki = st.columns(2)
+    col_ch, col_wiki = manual.columns(2)
 
     # --- Companies House person choice (grouped records) ---
     with col_ch:
@@ -199,37 +272,20 @@ elif st.session_state.stage == "disambiguate":
             if chosen_wiki.snippet:
                 st.caption(chosen_wiki.snippet + "…")
 
-    st.divider()
-    confirm_col, back_col = st.columns([1, 1])
-    with confirm_col:
-        confirm = st.button("Confirm & build one-sheet", type="primary")
-    with back_col:
-        if st.button("Start over"):
-            reset_to_search()
-            st.rerun()
-
-    if confirm:
+    if manual.button("Confirm manual selection & build", type="primary"):
         if not chosen_officer and not chosen_wiki:
-            st.error(
+            manual.error(
                 "Select at least one match (Companies House or Wikipedia) before "
-                "building the sheet — this prevents building a sheet for the wrong "
-                "person."
+                "building the sheet."
             )
         else:
-            with st.status("Assembling one-sheet…", expanded=True) as status:
-                st.session_state.sheet = assembly.build_one_sheet(
-                    confirmed_name=(
-                        chosen_wiki.title if chosen_wiki else chosen_officer.name
-                    ),
-                    officer=chosen_officer,
-                    wiki_title=chosen_wiki.title if chosen_wiki else None,
-                    context=st.session_state.context,
-                    include_news=True,
-                    progress=st.write,
-                )
-                status.update(label="One-sheet ready", state="complete")
-            st.session_state.stage = "sheet"
-            st.rerun()
+            _build_sheet(
+                officer=chosen_officer,
+                wiki_title=chosen_wiki.title if chosen_wiki else None,
+                confirmed_name=(
+                    chosen_wiki.title if chosen_wiki else chosen_officer.name
+                ),
+            )
 
 
 # ============================================================================

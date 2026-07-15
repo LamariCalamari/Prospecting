@@ -51,6 +51,31 @@ class Candidates:
     birth_year: Optional[str] = None  # from the top Wikipedia match, for CH linking
 
 
+@dataclass
+class PersonCandidate:
+    """One *person* the user can pick — identity first, sources attached.
+
+    Merges a Wikipedia identity (who they are) with their Companies House
+    records (what they run), so the user picks a human, not a filing fragment.
+    """
+    display_name: str
+    description: Optional[str] = None   # "British luxury property developer…"
+    thumbnail: Optional[str] = None
+    birth_year: Optional[str] = None
+    wiki_title: Optional[str] = None
+    officer: Optional[OfficerCandidate] = None  # representative CH record
+    top_companies: list[str] = field(default_factory=list)
+    n_appointments: int = 0
+
+    @property
+    def has_wiki(self) -> bool:
+        return self.wiki_title is not None
+
+    @property
+    def has_ch(self) -> bool:
+        return self.officer is not None
+
+
 def find_candidates(name: str, context: str = "") -> Candidates:
     """Query Companies House and Wikipedia for possible matches.
 
@@ -126,6 +151,110 @@ def find_candidates(name: str, context: str = "") -> Candidates:
     result.officers = officers
 
     return result
+
+
+def merge_people(wiki_persons: list[dict], groups, query: str) -> list[PersonCandidate]:
+    """Merge Wikipedia identities with Companies House officer groups.
+
+    `wiki_persons` items: {"title", "description", "thumbnail", "birth_year",
+    "lead_name"}. Prominent (Wikipedia-known) people rank first — the targets
+    of this tool are usually notable founders/wealthy individuals — with their
+    CH group attached by name + birth year. Remaining CH-only groups follow,
+    largest first. Pure function so ranking/matching is unit-testable.
+    """
+    people: list[PersonCandidate] = []
+    remaining = list(groups)
+
+    for wp in wiki_persons:
+        match = None
+        for g in remaining:
+            name_ok = prospecting.names_match(
+                g.primary.name or "", wp.get("lead_name") or wp["title"]
+            ) or prospecting.names_match(g.primary.name or "", wp["title"])
+            if not name_ok:
+                continue
+            if (
+                wp.get("birth_year")
+                and g.birth_year
+                and g.birth_year != wp["birth_year"]
+            ):
+                continue  # a namesake, not this person
+            match = g
+            break
+        if match is not None:
+            remaining.remove(match)
+        people.append(
+            PersonCandidate(
+                display_name=wp["title"],
+                description=wp.get("description"),
+                thumbnail=wp.get("thumbnail"),
+                birth_year=wp.get("birth_year"),
+                wiki_title=wp["title"],
+                officer=match.primary if match else None,
+                top_companies=(match.top_companies if match else [])[:4],
+                n_appointments=match.total_appointments if match else 0,
+            )
+        )
+
+    # People with a CH footprint but no Wikipedia page — still real candidates,
+    # ranked below the notable ones, largest CH footprint first.
+    for g in remaining[:4]:
+        if not prospecting.names_match(g.primary.name or "", query):
+            continue
+        people.append(
+            PersonCandidate(
+                display_name=prospecting.company_case(g.primary.name or ""),
+                description=None,
+                birth_year=g.birth_year,
+                officer=g.primary,
+                top_companies=g.top_companies[:4],
+                n_appointments=max(
+                    g.total_appointments, g.primary.appointment_count or 0
+                ),
+            )
+        )
+    return people[:6]
+
+
+def find_people(name: str, context: str = "") -> tuple[list[PersonCandidate], Candidates]:
+    """Identity-first search: a short ranked list of likely *people*.
+
+    Returns (people, raw candidates) — the raw candidates feed the manual
+    fallback UI for cases the automatic merge gets wrong.
+    """
+    cands = find_candidates(name, context)
+    query = name.strip()
+
+    # Enrich the name-matching Wikipedia hits into person profiles (parallel).
+    matching = [w for w in cands.wiki
+                if prospecting.names_match(w.title, query)][:5]
+
+    def _profile(w) -> Optional[dict]:
+        try:
+            summary = wiki.get_summary(w.title)
+        except wiki.WikipediaError:
+            return None
+        if not summary:
+            return None
+        birth = prospecting.extract_birth_year(summary.description or "") or \
+            prospecting.extract_birth_year(summary.extract or "")
+        return {
+            "title": summary.title,
+            "description": summary.description,
+            "thumbnail": summary.thumbnail,
+            "birth_year": birth,
+            "lead_name": prospecting.extract_lead_name(summary.extract or ""),
+        }
+
+    wiki_persons: list[dict] = []
+    if matching:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            for prof in pool.map(_profile, matching):
+                if prof:
+                    wiki_persons.append(prof)
+
+    groups = prospecting.group_officers(cands.officers)
+    return merge_people(wiki_persons, groups, query), cands
 
 
 def _merged_appointments(officer: OfficerCandidate) -> list:

@@ -282,6 +282,44 @@ class TestOfficerGrouping(unittest.TestCase):
         self.assertIsNone(prospecting.best_group_index(groups, "Nick Candy"))
 
 
+class TestMergePeople(unittest.TestCase):
+    def _grp(self, name, year, appts, oid="x"):
+        g = prospecting.group_officers([
+            OfficerCandidate(officer_id=oid, name=name, source_url="",
+                             date_of_birth=f"{year}-01" if year else None,
+                             appointment_count=appts)
+        ])[0]
+        return g
+
+    def test_wiki_person_gets_matching_ch_group(self):
+        wiki_persons = [{
+            "title": "Nick Candy",
+            "description": "British luxury property developer",
+            "thumbnail": None,
+            "birth_year": "1973",
+            "lead_name": "Nicholas Anthony Christopher Candy",
+        }]
+        groups = [
+            self._grp("Nicholas Anthony Christopher CANDY", "1955", 7, "old"),
+            self._grp("Nicholas Anthony Christopher CANDY", "1973", 45, "him"),
+        ]
+        people = assembly.merge_people(wiki_persons, groups, "Nick Candy")
+        self.assertEqual(people[0].display_name, "Nick Candy")
+        self.assertTrue(people[0].has_wiki and people[0].has_ch)
+        self.assertEqual(people[0].officer.officer_id, "him")  # 1973, not 1955
+        # The 1955 namesake still appears as a CH-only candidate below.
+        ch_only = [p for p in people[1:] if p.has_ch and not p.has_wiki]
+        self.assertTrue(any(p.birth_year == "1955" for p in ch_only))
+
+    def test_wiki_only_person_still_listed(self):
+        wiki_persons = [{"title": "Jane Doe", "description": "novelist",
+                         "thumbnail": None, "birth_year": None, "lead_name": None}]
+        people = assembly.merge_people(wiki_persons, [], "Jane Doe")
+        self.assertEqual(len(people), 1)
+        self.assertTrue(people[0].has_wiki)
+        self.assertFalse(people[0].has_ch)
+
+
 class TestValuation(unittest.TestCase):
     def test_band_to_range(self):
         self.assertEqual(
