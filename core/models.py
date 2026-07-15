@@ -27,6 +27,11 @@ class OfficerCandidate:
     address: Optional[str] = None
     top_companies: list[str] = field(default_factory=list)  # for at-a-glance matching
     description: Optional[str] = None  # CH's own snippet, e.g. "Born 1980"
+    # Officer-level identity fields from CH appointment filings — describe the
+    # person ("Property Developer · British · London") without needing Wikipedia.
+    occupation: Optional[str] = None
+    nationality: Optional[str] = None
+    residence: Optional[str] = None
 
 
 @dataclass

@@ -141,15 +141,23 @@ def _format_dob(dob: Optional[dict]) -> Optional[str]:
 
 def get_officer_appointments(
     officer_id: str, max_items: int = 200
-) -> tuple[list[Appointment], list[str]]:
-    """Return (appointments, top_company_names) for one officer.
+) -> tuple[list[Appointment], list[str], dict]:
+    """Return (appointments, top_company_names, identity) for one officer.
 
     Pages through all appointments up to `max_items` so the sheet reflects the
     person's full directorship history, not just the first page. Callers that
     only need the disambiguation preview pass a small `max_items` to stay fast.
     top_company_names is a short list used to enrich the disambiguation card.
+    identity carries the officer-level fields CH files with appointments —
+    occupation, nationality, country of residence — which describe *who the
+    person is* even when they have no Wikipedia page.
     """
     items = _paged_items(f"/officers/{officer_id}/appointments", max_items=max_items)
+    identity: dict = {}
+    for item in items:
+        for key in ("occupation", "nationality", "country_of_residence"):
+            if not identity.get(key) and item.get(key):
+                identity[key] = item[key]
     appointments: list[Appointment] = []
     for item in items:
         appointed = item.get("appointed_to") or {}
@@ -175,7 +183,7 @@ def get_officer_appointments(
         reverse=False,
     )
     top = [a.company_name for a in appointments[:4]]
-    return appointments, top
+    return appointments, top, identity
 
 
 def get_company_profile(company_number: str) -> Optional[CompanyInfo]:

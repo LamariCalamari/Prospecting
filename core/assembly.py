@@ -140,8 +140,11 @@ def find_candidates(name: str, context: str = "") -> Candidates:
     # matching. Done once over the merged list, in parallel to stay fast.
     def _enrich(officer: OfficerCandidate) -> None:
         try:
-            _, top = ch.get_officer_appointments(officer.officer_id, max_items=6)
+            _, top, ident = ch.get_officer_appointments(officer.officer_id, max_items=6)
             officer.top_companies = top
+            officer.occupation = ident.get("occupation")
+            officer.nationality = ident.get("nationality")
+            officer.residence = ident.get("country_of_residence")
         except ch.CompaniesHouseError:
             pass
 
@@ -201,10 +204,14 @@ def merge_people(wiki_persons: list[dict], groups, query: str) -> list[PersonCan
     for g in remaining[:4]:
         if not prospecting.names_match(g.primary.name or "", query):
             continue
+        # No Wikipedia page — describe them from what CH itself files:
+        # occupation, nationality, residence ("Property Developer · British").
+        desc_bits = [b for b in (g.occupation, g.nationality, g.residence) if b]
         people.append(
             PersonCandidate(
                 display_name=prospecting.company_case(g.primary.name or ""),
-                description=None,
+                description=(" · ".join(desc_bits) + " (per CH filings)"
+                             if desc_bits else None),
                 birth_year=g.birth_year,
                 officer=g.primary,
                 top_companies=g.top_companies[:4],
@@ -292,7 +299,7 @@ def _merged_appointments(officer: OfficerCandidate) -> list:
 
     def _fetch(rec: OfficerCandidate):
         try:
-            appts, _ = ch.get_officer_appointments(rec.officer_id)
+            appts, _, _ = ch.get_officer_appointments(rec.officer_id)
             return appts
         except ch.CompaniesHouseError:
             return []

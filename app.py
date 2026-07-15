@@ -143,7 +143,9 @@ elif st.session_state.stage == "disambiguate":
                         title_bits.append(f"b. {p.birth_year}")
                     st.markdown(" · ".join(title_bits))
                     if p.description:
-                        st.markdown(p.description.capitalize())
+                        # Uppercase the first letter only — .capitalize() would
+                        # mangle "British · United Kingdom (per CH filings)".
+                        st.markdown(p.description[0].upper() + p.description[1:])
                     detail_bits = []
                     if p.n_appointments:
                         detail_bits.append(
@@ -160,6 +162,12 @@ elif st.session_state.stage == "disambiguate":
                     srcs.append("Companies House ✓" if p.has_ch
                                 else "no Companies House match")
                     detail_bits.append(" + ".join(srcs))
+                    # One-click identity check on LinkedIn (name + top company).
+                    li_url = prospecting.linkedin_search_url(
+                        p.display_name,
+                        p.top_companies[0] if p.top_companies else "",
+                    )
+                    detail_bits.append(f"[check LinkedIn ↗]({li_url})")
                     st.caption(" — ".join(detail_bits))
                 with c_btn:
                     if st.button(

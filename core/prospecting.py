@@ -223,6 +223,9 @@ class OfficerGroup:
     birth_year: Optional[str] = None     # "1973" or None when no record has one
     total_appointments: int = 0
     top_companies: list[str] = field(default_factory=list)
+    occupation: Optional[str] = None     # from CH appointment filings
+    nationality: Optional[str] = None
+    residence: Optional[str] = None
 
 
 def group_officers(officers) -> list[OfficerGroup]:
@@ -255,6 +258,9 @@ def group_officers(officers) -> list[OfficerGroup]:
         for name in off.top_companies:
             if name not in target.top_companies:
                 target.top_companies.append(name)
+        for attr in ("occupation", "nationality", "residence"):
+            if not getattr(target, attr) and getattr(off, attr, None):
+                setattr(target, attr, getattr(off, attr))
         # The fattest record becomes the group's representative.
         if (off.appointment_count or 0) > (target.primary.appointment_count or 0):
             target.primary = off
