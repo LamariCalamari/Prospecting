@@ -176,12 +176,11 @@ def merge_people(wiki_persons: list[dict], groups, query: str) -> list[PersonCan
             ) or prospecting.names_match(g.primary.name or "", wp["title"])
             if not name_ok:
                 continue
-            if (
-                wp.get("birth_year")
-                and g.birth_year
-                and g.birth_year != wp["birth_year"]
-            ):
-                continue  # a namesake, not this person
+            # Attach only on positive identity evidence: both sides must state
+            # the same birth year. Name similarity alone once glued a cricketer
+            # to a random motor company — accuracy beats coverage here.
+            if not (wp.get("birth_year") and g.birth_year == wp["birth_year"]):
+                continue
             match = g
             break
         if match is not None:
@@ -223,7 +222,55 @@ def merge_people(wiki_persons: list[dict], groups, query: str) -> list[PersonCan
     return people[:6]
 
 
-def find_people(name: str, context: str = "") -> tuple[list[PersonCandidate], Candidates]:
+def _company_officer_candidates(query: str, company: str) -> list[PersonCandidate]:
+    """Find the person via their employer — the executive path.
+
+    A bare name search drowns a listed-company CEO in namesakes, but the user
+    usually knows the company. Search CH for it, list its officers, match the
+    name: that person is close to certain and goes to the top of the cards.
+    """
+    results: list[PersonCandidate] = []
+    try:
+        companies = ch.search_companies(company, limit=4)
+    except ch.CompaniesHouseError:
+        return results
+    for comp in companies:
+        try:
+            officers = ch.get_company_officers(comp["company_number"])
+        except ch.CompaniesHouseError:
+            continue
+        for o in officers:
+            if not o["officer_id"] or not prospecting.names_match(o["name"], query):
+                continue
+            role = prospecting.role_case(o["role"])
+            resigned = " — resigned" if o.get("resigned_on") else ""
+            oc = OfficerCandidate(
+                officer_id=o["officer_id"],
+                name=o["name"],
+                source_url=f"{ch.CH_WEB_BASE}/officers/{o['officer_id']}/appointments",
+                date_of_birth=o["dob"],
+                occupation=o.get("occupation"),
+            )
+            results.append(
+                PersonCandidate(
+                    display_name=prospecting.person_name_case(o["name"]),
+                    description=(
+                        f"{role} at {prospecting.company_case(comp['title'])}"
+                        f"{resigned} · matched via your company hint (Companies House)"
+                    ),
+                    birth_year=(o["dob"] or "")[:4] or None,
+                    officer=oc,
+                    top_companies=[comp["title"]],
+                )
+            )
+        if results:
+            break  # officers of the best-matching company are enough
+    return results[:2]
+
+
+def find_people(
+    name: str, context: str = "", company: str = ""
+) -> tuple[list[PersonCandidate], Candidates]:
     """Identity-first search: a short ranked list of likely *people*.
 
     Returns (people, raw candidates) — the raw candidates feed the manual
@@ -232,9 +279,22 @@ def find_people(name: str, context: str = "") -> tuple[list[PersonCandidate], Ca
     cands = find_candidates(name, context)
     query = name.strip()
 
+    # Executive path: a company hint pinpoints the person via that company's
+    # own officer list — the most precise signal we have, so it ranks first.
+    exec_cards = _company_officer_candidates(query, company.strip()) if company.strip() else []
+
     # Enrich the name-matching Wikipedia hits into person profiles (parallel).
     matching = [w for w in cands.wiki
                 if prospecting.names_match(w.title, query)][:5]
+
+    # Person cards must be people: drop buildings/films/museums that sneak
+    # through token matching ("City Hall (St. Louis)"). Best-effort.
+    if matching:
+        try:
+            humans = wikidata.filter_humans([w.title for w in matching])
+            matching = [w for w in matching if w.title in humans]
+        except wikidata.WikidataError:
+            pass  # keep all rather than lose real candidates
 
     def _profile(w) -> Optional[dict]:
         try:
@@ -261,7 +321,19 @@ def find_people(name: str, context: str = "") -> tuple[list[PersonCandidate], Ca
                     wiki_persons.append(prof)
 
     groups = prospecting.group_officers(cands.officers)
-    return merge_people(wiki_persons, groups, query), cands
+    people = merge_people(wiki_persons, groups, query)
+
+    # Executive cards lead; drop general cards that are clearly the same person
+    # (same name tokens + same birth year) so no one appears twice.
+    if exec_cards:
+        def _dupe(p: PersonCandidate) -> bool:
+            return any(
+                prospecting.names_match(p.display_name, e.display_name)
+                and p.birth_year == e.birth_year
+                for e in exec_cards
+            )
+        people = exec_cards + [p for p in people if not _dupe(p)]
+    return people[:6], cands
 
 
 def _merged_appointments(officer: OfficerCandidate) -> list:

@@ -132,6 +132,48 @@ def _format_net_worth(claim: dict, unit_labels: dict) -> Optional[str]:
     return out
 
 
+def filter_humans(titles: list[str]) -> set[str]:
+    """Of these Wikipedia titles, which are actual people (Wikidata P31=Q5)?
+
+    Stops buildings, films and museums ("City Hall (St. Louis)") from being
+    offered as person candidates. Two batched API calls for any number of
+    titles. Best-effort: on failure, callers should keep all titles.
+    """
+    if not titles:
+        return set()
+    params = {
+        "action": "query",
+        "prop": "pageprops",
+        "ppprop": "wikibase_item",
+        "redirects": 1,
+        "titles": "|".join(titles[:50]),
+        "format": "json",
+    }
+    try:
+        resp = SESSION.get(
+            config.WIKIPEDIA_API_URL, params=params, timeout=config.REQUEST_TIMEOUT
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise WikidataError(f"Network error checking humans: {exc}") from exc
+
+    qid_to_title: dict[str, str] = {}
+    for page in (data.get("query", {}).get("pages", {}) or {}).values():
+        qid = (page.get("pageprops") or {}).get("wikibase_item")
+        if qid:
+            qid_to_title[qid] = page.get("title", "")
+
+    entities = _get_entities(sorted(qid_to_title), props="claims")
+    humans: set[str] = set()
+    for qid, ent in entities.items():
+        for claim in (ent.get("claims", {}) or {}).get("P31", []) or []:
+            if _entity_id_of(claim) == "Q5":  # instance of: human
+                humans.add(qid_to_title[qid])
+                break
+    return humans
+
+
 def enrich_person(wikipedia_title: str) -> Optional[WikidataFacts]:
     """Build WikidataFacts for the confirmed person, or None if no entity."""
     qid = _qid_for_title(wikipedia_title)

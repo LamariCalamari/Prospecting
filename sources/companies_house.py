@@ -186,6 +186,44 @@ def get_officer_appointments(
     return appointments, top, identity
 
 
+def search_companies(query: str, limit: int = 5) -> list[dict]:
+    """Search companies by name. Returns [{title, company_number, status}]."""
+    if not query.strip():
+        return []
+    data = _get("/search/companies", params={"q": query, "items_per_page": limit})
+    out = []
+    for item in data.get("items", []) or []:
+        num = item.get("company_number")
+        if num:
+            out.append({
+                "title": item.get("title", ""),
+                "company_number": num,
+                "status": item.get("company_status"),
+            })
+    return out
+
+
+def get_company_officers(company_number: str, max_items: int = 60) -> list[dict]:
+    """Officers of one company — the precise way to find an executive by
+    employer when a bare name search drowns in namesakes."""
+    if not company_number:
+        return []
+    items = _paged_items(f"/company/{company_number}/officers", max_items=max_items)
+    officers = []
+    for item in items:
+        link = ((item.get("links") or {}).get("officer") or {}).get("appointments", "")
+        officers.append({
+            "name": item.get("name", ""),
+            "role": item.get("officer_role"),
+            "appointed_on": item.get("appointed_on"),
+            "resigned_on": item.get("resigned_on"),
+            "officer_id": _officer_id_from_self_link(link) if link else "",
+            "dob": _format_dob(item.get("date_of_birth")),
+            "occupation": item.get("occupation"),
+        })
+    return officers
+
+
 def get_company_profile(company_number: str) -> Optional[CompanyInfo]:
     if not company_number:
         return None

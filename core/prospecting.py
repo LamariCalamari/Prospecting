@@ -115,6 +115,14 @@ def company_case(name: str) -> str:
     return re.sub(r"[A-Za-z]+", fix_run, name or "")
 
 
+def person_name_case(name: str) -> str:
+    """'HALL, Louis Tancred' (CH surname-first) -> 'Louis Tancred Hall'."""
+    if "," in (name or ""):
+        last, _, first = name.partition(",")
+        name = f"{first.strip()} {last.strip()}"
+    return company_case(name)
+
+
 def role_case(role: Optional[str]) -> str:
     """'llp-designated-member' -> 'LLP Designated Member'."""
     text = (role or "officer").replace("-", " ").title()

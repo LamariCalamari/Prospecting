@@ -89,7 +89,9 @@ if st.session_state.stage == "search":
         )
         with st.spinner("Identifying likely people…"):
             people, cands = assembly.find_people(
-                st.session_state.name, st.session_state.context
+                st.session_state.name,
+                st.session_state.context,
+                company=company.strip(),
             )
             st.session_state.people = people
             st.session_state.candidates = cands
