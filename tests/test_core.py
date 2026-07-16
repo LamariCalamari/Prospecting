@@ -385,5 +385,53 @@ class TestValuation(unittest.TestCase):
         self.assertEqual(valuation.fmt_gbp(None), "—")
 
 
+class TestNewSignalSources(unittest.TestCase):
+    def test_ec_date_parse(self):
+        from sources.electoral_commission import parse_ec_date
+        self.assertEqual(parse_ec_date("/Date(1759276800000)/"), "2025-10-01")
+        self.assertIsNone(parse_ec_date(None))
+
+    def test_market_same_company(self):
+        from sources.market import same_company
+        self.assertTrue(same_company("CERILLION TECHNOLOGIES LIMITED", "Cerillion Plc"))
+        self.assertTrue(same_company("CERILLION PLC", "Cerillion Plc"))
+        self.assertFalse(same_company("CANDY CAPITAL LIMITED", "Cerillion Plc"))
+
+    def test_ixbrl_extracts_pnl_concepts(self):
+        xhtml = (
+            '<ix:nonFraction name="uk:TurnoverRevenue" contextRef="c" scale="3">'
+            "43,800</ix:nonFraction>"
+            '<ix:nonFraction name="uk:ProfitLossOnOrdinaryActivitiesBeforeTax" '
+            'contextRef="c" scale="3">12,300</ix:nonFraction>'
+            '<ix:nonFraction name="uk:AverageNumberEmployeesDuringPeriod" '
+            'contextRef="c">305</ix:nonFraction>'
+        )
+        fig = valuation.extract_ixbrl_figures(xhtml)
+        self.assertEqual(fig["turnover"], 43_800_000)
+        self.assertEqual(fig["profit"], 12_300_000)
+        self.assertEqual(fig["employees"], 305)
+
+    def test_why_they_matter_bullets(self):
+        from core import signals
+        from core.models import Donation, ListedQuote
+        sheet = OneSheet(
+            confirmed_name="Jane Example",
+            listed=[ListedQuote("EXAMPLE PLC", "EXM.L", "LSE", 500.0, "GBp",
+                                "http://y/EXM.L")],
+            donations=[Donation("Jane Example", "Some Party", 100_000.0,
+                                "2025-01-01", "http://ec")],
+            companies=[CompanyInfo("EXAMPLE PLC", "1", turnover=43_800_000.0,
+                                   employees=305, source_url="http://ch/1")],
+        )
+        sig = prospecting.derive_signals(sheet, "Jane Example")
+        est = valuation.build_estimates(sheet, "Jane Example")
+        bullets = signals.why_they_matter(sheet, sig, est)
+        text = "\n".join(bullets)
+        self.assertIn("publicly listed", text)
+        self.assertIn("£43.8m", text)
+        self.assertIn("£100k", text)
+        self.assertIn("Some Party", text)
+
+
 if __name__ == "__main__":
     unittest.main()

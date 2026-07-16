@@ -28,8 +28,10 @@ from core.models import (
 from core import prospecting, valuation
 from sources import charity_commission as charity
 from sources import companies_house as ch
+from sources import electoral_commission as ec
 from sources import fca
 from sources import gazette
+from sources import market
 from sources import news as news_source
 from sources import opensanctions
 from sources import wikidata
@@ -467,11 +469,11 @@ def build_one_sheet(
                     if psc:
                         sheet.psc_filings.extend(psc)
 
-        # --- Filed-accounts figures for stake valuation ---
-        # For companies where this person holds a *current* disclosed stake,
-        # pull the latest accounts (iXBRL) and extract net assets, so the
-        # estimates layer can price the stake on a book-value basis. Bounded
-        # and parallel; companies with paper/PDF-only accounts just stay blank.
+        # --- Filed-accounts figures: stake valuation + company scale ---
+        # Two audiences: (1) companies where the person holds a disclosed stake
+        # (net assets price the stake); (2) companies they actively run
+        # (turnover/profit/employees turn "a company" into "a £43m-revenue
+        # company" — the scale signal an executive's sheet needs).
         stake_numbers: list[str] = []
         for psc_item in sheet.psc_filings:
             if psc_item.ceased_on or not psc_item.name:
@@ -482,9 +484,18 @@ def build_one_sheet(
                 continue
             if psc_item.company_number not in stake_numbers:
                 stake_numbers.append(psc_item.company_number)
-        stake_numbers = stake_numbers[:_ACCOUNTS_FETCH_LIMIT]
-        if stake_numbers:
-            _note(f"Reading filed accounts for {len(stake_numbers)} stake companies…")
+        active_numbers = [
+            a.company_number for a in sheet.appointments
+            if a.status == "active" and a.company_number
+        ]
+        accounts_numbers: list[str] = []
+        for num in stake_numbers + active_numbers:
+            if num not in accounts_numbers:
+                accounts_numbers.append(num)
+            if len(accounts_numbers) >= _ACCOUNTS_FETCH_LIMIT:
+                break
+        if accounts_numbers:
+            _note(f"Reading filed accounts for {len(accounts_numbers)} companies…")
             by_number = {c.company_number: c for c in sheet.companies}
 
             def _fetch_accounts(num: str) -> None:
@@ -500,9 +511,12 @@ def build_one_sheet(
                 figures = valuation.extract_ixbrl_figures(xhtml)
                 comp.net_assets = figures.get("net_assets")
                 comp.cash_at_bank = figures.get("cash")
+                comp.turnover = figures.get("turnover")
+                comp.profit_before_tax = figures.get("profit")
+                comp.employees = figures.get("employees")
 
             with ThreadPoolExecutor(max_workers=6) as pool:
-                list(pool.map(_fetch_accounts, stake_numbers))
+                list(pool.map(_fetch_accounts, accounts_numbers))
 
     # --- Wikipedia: confident summary only ---
     if wiki_title:
@@ -591,7 +605,28 @@ def _add_person_sources(
         except charity.CharityCommissionError as exc:
             sheet.source_notes.append(f"Charity Commission: {exc}")
 
-    tasks = [_wikidata, _news, _gazette, _fca, _sanctions, _charity]
+    def _donations():
+        try:
+            sheet.donations = ec.search_donations(confirmed_name)
+        except ec.ElectoralCommissionError as exc:
+            sheet.source_notes.append(f"Electoral Commission: {exc}")
+
+    def _listed():
+        # Check the person's current companies against public markets. Only a
+        # handful of lookups — the *distinct* active companies, biggest first.
+        seen_names: list[str] = []
+        for a in sheet.appointments:
+            if a.status != "active" or not a.company_name:
+                continue
+            if a.company_name not in seen_names:
+                seen_names.append(a.company_name)
+        for name in seen_names[:5]:
+            quote = market.find_listed(name)
+            if quote:
+                sheet.listed.append(quote)
+
+    tasks = [_wikidata, _news, _gazette, _fca, _sanctions, _charity,
+             _donations, _listed]
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         list(pool.map(lambda fn: fn(), tasks))
 

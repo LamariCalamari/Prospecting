@@ -14,7 +14,7 @@ from __future__ import annotations
 import streamlit as st
 
 import config
-from core import assembly, export, prospecting, valuation
+from core import assembly, export, prospecting, signals, valuation
 from core.models import OfficerCandidate
 
 st.set_page_config(page_title="Prospecting one-sheet", page_icon="🔎", layout="wide")
@@ -340,11 +340,27 @@ elif st.session_state.stage == "sheet":
             "conservative floor covering UK filings only — NOT total wealth. "
             "See the 💰 Stake value tab for the full working.",
         ))
+    donation_total = sum(d.value for d in sheet.donations if d.value)
+    if donation_total:
+        tiles.append((
+            "Political donations",
+            valuation.fmt_gbp(donation_total),
+            "Registered donations to UK political parties (Electoral "
+            "Commission) matched to this name — verify identity.",
+        ))
+    if sheet.listed:
+        tiles.append((
+            "Listed company",
+            sheet.listed[0].symbol,
+            f"Officer of publicly listed "
+            f"{prospecting.company_case(sheet.listed[0].company_name)}.",
+        ))
     tiles.append(("Active directorships", str(sig.active_directorships),
                   "Live roles at live companies (dissolved companies excluded)."))
     if sig.stakes:
         tiles.append(("Companies controlled", str(len(sig.stakes)),
                       "Current PSC filings naming this person."))
+    tiles = tiles[:5]  # metric tiles get cramped beyond five
     cols = st.columns(len(tiles))
     for col, (label, value, help_text) in zip(cols, tiles):
         col.metric(label, value, help=help_text)
@@ -384,6 +400,13 @@ elif st.session_state.stage == "sheet":
 
     # ========================= OVERVIEW =========================
     with tab_overview:
+        why = signals.why_they_matter(sheet, sig, est)
+        if why:
+            st.markdown("### Why they matter")
+            for bullet in why:
+                st.markdown(f"- {bullet}")
+            st.divider()
+
         st.markdown("### Position")
         if sheet.wiki and sheet.wiki.description:
             st.markdown(
@@ -655,6 +678,12 @@ elif st.session_state.stage == "sheet":
                     f"next accounts due {c.accounts_next_due}"
                     + (" ⚠️ overdue" if c.accounts_overdue else "")
                 )
+            if c.turnover is not None:
+                facts.append(f"revenue {valuation.fmt_gbp(c.turnover)}")
+            if c.profit_before_tax is not None:
+                facts.append(f"pre-tax profit {valuation.fmt_gbp(c.profit_before_tax)}")
+            if c.employees:
+                facts.append(f"~{c.employees:,.0f} staff")
             if c.net_assets is not None:
                 facts.append(f"net assets {valuation.fmt_gbp(c.net_assets)}")
             st.markdown(" · ".join(facts) + f" · [Companies House ↗]({c.source_url})")
@@ -743,6 +772,19 @@ elif st.session_state.stage == "sheet":
                     )
             else:
                 st.caption("No sanctions/PEP/watchlist matches.")
+
+        st.markdown("### Political donations (Electoral Commission)")
+        if sheet.donations:
+            st.caption("Registered UK political donations matched to this name — verify identity.")
+            for d in sheet.donations:
+                val = valuation.fmt_gbp(d.value) if d.value else "—"
+                st.markdown(
+                    f"- **{val}** to {d.recipient} ({d.date or '—'}) — "
+                    f"donor name on record: {d.donor_name} "
+                    f"· [EC register ↗]({d.source_url})"
+                )
+        else:
+            st.caption("No registered political donations matched.")
 
         st.markdown("### Official notices (The Gazette)")
         if sheet.gazette_notices:

@@ -43,6 +43,18 @@ _CONCEPTS: dict[str, tuple[str, ...]] = {
         "totalassetslesscurrentliabilities",
     ),
     "cash": ("cashbankonhand", "cashbankinhand", "cashcashequivalents"),
+    # P&L scale signals — turn "a company" into "a £43m-revenue company".
+    "turnover": ("turnoverrevenue", "revenue", "turnover", "grossrevenue"),
+    "profit": (
+        "profitlossonordinaryactivitiesbeforetax",
+        "profitlossbeforetax",
+        "profitloss",
+    ),
+    "employees": (
+        "averagenumberemployeesduringperiod",
+        "averagenumberofemployeesduringperiod",
+        "employeestotal",
+    ),
 }
 
 

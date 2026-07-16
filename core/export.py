@@ -6,7 +6,7 @@ every fact with a source link, matching the on-screen sheet.
 """
 from __future__ import annotations
 
-from core import prospecting, valuation
+from core import prospecting, signals, valuation
 from core.models import OneSheet
 
 # fpdf2's core fonts are Latin-1 only. Map the common "smart" punctuation that
@@ -67,6 +67,26 @@ def to_markdown(sheet: OneSheet) -> str:
         "verbatim._"
     )
     lines.append("")
+
+    # Why they matter — synthesized, each bullet cites its source.
+    est_full = valuation.build_estimates(sheet, sheet.confirmed_name)
+    why = signals.why_they_matter(sheet, sig, est_full)
+    if why:
+        lines.append("## Why they matter")
+        for bullet in why:
+            lines.append(f"- {bullet}")
+        lines.append("")
+
+    # Political donations
+    if sheet.donations:
+        lines.append("## Political donations — source: Electoral Commission")
+        for d in sheet.donations:
+            val = valuation.fmt_gbp(d.value) if d.value else "—"
+            lines.append(
+                f"- {val} to {d.recipient} ({d.date or '—'}) — donor on record: "
+                f"{d.donor_name} — [EC register]({d.source_url})"
+            )
+        lines.append("")
 
     # Estimated stake value (book-value basis)
     est = valuation.build_estimates(sheet, sheet.confirmed_name)
@@ -370,12 +390,19 @@ def to_excel(sheet: OneSheet) -> bytes:
         f"{valuation.fmt_gbp(est_sum.total_lo)} – {valuation.fmt_gbp(est_sum.total_hi)}"
         if est_sum.counted else "—"
     )
+    donation_total = sum(d.value for d in sheet.donations if d.value)
+    listed_desc = "; ".join(
+        f"{q.company_name} ({q.symbol})" for q in sheet.listed
+    ) or "—"
     summary_rows = [
         ("Name", sheet.confirmed_name),
         ("Research context", sheet.context or "—"),
         ("Net worth (published)", sig.net_worth or "—"),
         ("Largest disclosed stake", stake),
         ("Est. stake value (book-value floor)", book),
+        ("Political donations (registered)",
+         f"£{donation_total:,.0f}" if donation_total else "—"),
+        ("Listed-company roles", listed_desc),
         ("Active directorships", sig.active_directorships),
         ("Past directorships", sig.resigned_directorships),
         ("Companies controlled (current PSC)", len(sig.stakes)),
@@ -459,14 +486,26 @@ def to_excel(sheet: OneSheet) -> bytes:
     # --- Companies ---
     _add_sheet(
         "Companies",
-        ["Company", "Number", "Status", "Type", "Incorporated", "Accounts to",
-         "Accounts next due", "Overdue", "Has charges", "Insolvency history", "Source"],
-        [[c.company_name, c.company_number, c.status, c.company_type,
-          c.incorporation_date, c.accounts_last_made_up_to, c.accounts_next_due,
-          c.accounts_overdue, c.has_charges, c.has_insolvency_history, c.source_url]
+        ["Company", "Number", "Status", "Incorporated", "Accounts to",
+         "Revenue (GBP)", "Pre-tax profit (GBP)", "Employees", "Net assets (GBP)",
+         "Has charges", "Insolvency history", "Source"],
+        [[c.company_name, c.company_number, c.status,
+          c.incorporation_date, c.accounts_last_made_up_to,
+          c.turnover, c.profit_before_tax, c.employees, c.net_assets,
+          c.has_charges, c.has_insolvency_history, c.source_url]
          for c in sheet.companies],
-        link_cols={11},
+        link_cols={12},
         note="No company profiles returned.",
+    )
+
+    # --- Political donations ---
+    _add_sheet(
+        "Donations",
+        ["Date", "Value (GBP)", "Recipient", "Donor name on record", "Source"],
+        [[d.date, d.value, d.recipient, d.donor_name, d.source_url]
+         for d in sheet.donations],
+        link_cols={5},
+        note="No registered political donations matched (Electoral Commission).",
     )
 
     # --- PSC (all, incl. others) ---

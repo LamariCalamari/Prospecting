@@ -104,6 +104,9 @@ class CompanyInfo:
     # From the latest filed accounts (iXBRL), when parseable. GBP.
     net_assets: Optional[float] = None
     cash_at_bank: Optional[float] = None
+    turnover: Optional[float] = None
+    profit_before_tax: Optional[float] = None
+    employees: Optional[float] = None
 
 
 # --- Wikidata ---------------------------------------------------------------
@@ -163,6 +166,29 @@ class CharityRecord:
     source_url: str = ""
 
 
+# --- Electoral Commission (political donations) ------------------------------
+@dataclass
+class Donation:
+    """A registered political donation by this person (Electoral Commission)."""
+    donor_name: str
+    recipient: str
+    value: Optional[float] = None  # GBP
+    date: Optional[str] = None     # YYYY-MM-DD
+    source_url: str = ""
+
+
+# --- Listed-market quote ------------------------------------------------------
+@dataclass
+class ListedQuote:
+    """A company from this person's record that trades on a public market."""
+    company_name: str    # CH company name it matched
+    symbol: str
+    exchange: Optional[str] = None
+    price: Optional[float] = None
+    currency: Optional[str] = None
+    source_url: str = ""
+
+
 # --- Wikipedia --------------------------------------------------------------
 @dataclass
 class WikiCandidate:
@@ -214,4 +240,6 @@ class OneSheet:
     sanctions_hits: list[SanctionsHit] = field(default_factory=list)
     gazette_notices: list[GazetteNotice] = field(default_factory=list)
     charities: list[CharityRecord] = field(default_factory=list)
+    donations: list[Donation] = field(default_factory=list)
+    listed: list[ListedQuote] = field(default_factory=list)
     source_notes: list[str] = field(default_factory=list)  # e.g. "FCA not configured"
